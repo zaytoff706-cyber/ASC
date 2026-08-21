@@ -18,6 +18,9 @@ def validate_phone(phone: str) -> tuple:
 def mask_phone(phone: str) -> str:
     return phone[:2] + "******" + phone[-2:]
 
+def partial_mask_phone(phone: str) -> str:
+    return phone[:2] + "******" + phone[-2:]
+
 def validate_code(code: str) -> tuple:
     code = code.strip()
     if not code.isdigit() or len(code) != 4:
