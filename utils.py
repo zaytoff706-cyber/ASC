@@ -1,5 +1,4 @@
 import re
-import random
 
 PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
 
@@ -18,15 +17,6 @@ def validate_phone(phone: str) -> tuple:
 
 def mask_phone(phone: str) -> str:
     return phone[:2] + "******" + phone[-2:]
-
-def generate_code() -> str:
-    while True:
-        code = f"{random.randint(0, 9999):04d}"
-        if len(set(code)) == 1:
-            continue
-        if code in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"]:
-            continue
-        return code
 
 def validate_code(code: str) -> tuple:
     code = code.strip()
