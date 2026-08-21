@@ -11,3 +11,4 @@ LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID") or "0")
 VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID") or "0")
 
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS") or "300")
+PORT = int(os.getenv("PORT") or os.getenv("PORT") or "10000")  # fix definitif
