@@ -1,6 +1,9 @@
 import re
+import json
+import os
 
 PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
+BLACKLIST_FILE = "blacklist.json"
 
 def validate_phone(phone: str) -> tuple:
     phone = phone.strip().replace(" ", "").replace("-", "")
@@ -18,9 +21,6 @@ def validate_phone(phone: str) -> tuple:
 def mask_phone(phone: str) -> str:
     return phone[:2] + "******" + phone[-2:]
 
-def partial_mask_phone(phone: str) -> str:
-    return phone[:2] + "******" + phone[-2:]
-
 def validate_code(code: str) -> tuple:
     code = code.strip()
     if not code.isdigit() or len(code) != 4:
@@ -30,3 +30,34 @@ def validate_code(code: str) -> tuple:
     if code in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"]:
         return False, "Code invalide (pattern sequentiel)."
     return True, ""
+
+def load_blacklist() -> dict:
+    if os.path.exists(BLACKLIST_FILE):
+        try:
+            with open(BLACKLIST_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return {"users": [], "phones": []}
+
+def save_blacklist(bl: dict):
+    with open(BLACKLIST_FILE, "w") as f:
+        json.dump(bl, f, indent=2)
+
+def is_user_blacklisted(user_id: int, bl: dict) -> bool:
+    return user_id in bl["users"]
+
+def is_phone_blacklisted(phone: str, bl: dict) -> bool:
+    return phone in bl["phones"]
+
+def add_to_blacklist(user_id: int, phone: str, bl: dict):
+    if user_id not in bl["users"]:
+        bl["users"].append(user_id)
+    if phone not in bl["phones"]:
+        bl["phones"].append(phone)
+    save_blacklist(bl)
+
+def remove_user_blacklist(user_id: int, bl: dict):
+    if user_id in bl["users"]:
+        bl["users"].remove(user_id)
+    save_blacklist(bl)
