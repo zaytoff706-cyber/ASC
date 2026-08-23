@@ -4,6 +4,7 @@ import os
 
 PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
 BLACKLIST_FILE = "blacklist.json"
+SETUP_FILE = "setup_data.json"
 
 def validate_phone(phone: str) -> tuple:
     phone = phone.strip().replace(" ", "").replace("-", "")
@@ -60,4 +61,17 @@ def add_to_blacklist(user_id: int, phone: str, bl: dict):
 def remove_user_blacklist(user_id: int, bl: dict):
     if user_id in bl["users"]:
         bl["users"].remove(user_id)
-    save_blacklist(bl)
+        save_blacklist(bl)
+
+def load_setup_data() -> list:
+    if os.path.exists(SETUP_FILE):
+        try:
+            with open(SETUP_FILE, "r") as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_setup_data(data: list):
+    with open(SETUP_FILE, "w") as f:
+        json.dump(data, f, indent=2)
