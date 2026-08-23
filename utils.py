@@ -1,68 +1,39 @@
 import re
-import json
-import os
 import random
 
 PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
-BLACKLIST_FILE = "blacklist.json"
 
-def validate_phone(phone: str) -> tuple:
+def validate_phone(phone: str) -> tuple[bool, str]:
     phone = phone.strip().replace(" ", "").replace("-", "")
     if not PHONE_REGEX.match(phone):
-        return False, "Le numero doit commencer par 06 ou 07 et contenir exactement 10 chiffres."
+        return False, "Le numéro doit commencer par **06** ou **07** et contenir exactement **10 chiffres**."
     suffix = phone[2:]
     if len(set(suffix)) == 1:
-        return False, "Ce numero est invalide (chiffres repetes)."
+        return False, "Ce numéro est invalide (chiffres répétés)."
     if suffix in ["12345678","23456789","34567890","87654321","98765432","09876543"]:
-        return False, "Ce numero est invalide (pattern sequentiel)."
+        return False, "Ce numéro est invalide (pattern séquentiel)."
     if suffix[:2] == suffix[2:4] == suffix[4:6] == suffix[6:8]:
-        return False, "Ce numero est invalide (pattern repete)."
+        return False, "Ce numéro est invalide (pattern répété)."
     return True, ""
 
 def mask_phone(phone: str) -> str:
     return phone[:2] + "******" + phone[-2:]
 
 def generate_code() -> str:
-    """Genere un code de verification a 4 chiffres."""
-    return str(random.randint(1000, 9999))
+    while True:
+        code = f"{random.randint(0, 9999):04d}"
+        if len(set(code)) == 1:
+            continue
+        if code in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"]:
+            continue
+        return code
 
-def validate_code(code: str) -> tuple:
+def validate_code(code: str) -> tuple[bool, str]:
     code = code.strip()
     if not code.isdigit() or len(code) != 4:
-        return False, "Veuillez ecrire uniquement le code de verification a 4 chiffres."
+        return False, "Veuillez écrire uniquement le code de vérification à **4 chiffres**."
     if len(set(code)) == 1:
-        return False, "Code invalide (chiffres repetes)."
+        return False, "Code invalide (chiffres répétés)."
     if code in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"]:
-        return False, "Code invalide (pattern sequentiel)."
+        return False, "Code invalide (pattern séquentiel)."
     return True, ""
-
-def load_blacklist() -> dict:
-    if os.path.exists(BLACKLIST_FILE):
-        try:
-            with open(BLACKLIST_FILE, "r") as f:
-                return json.load(f)
-        except:
-            pass
-    return {"users": [], "phones": []}
-
-def save_blacklist(bl: dict):
-    with open(BLACKLIST_FILE, "w") as f:
-        json.dump(bl, f, indent=2)
-
-def is_user_blacklisted(user_id: int, bl: dict) -> bool:
-    return user_id in bl["users"]
-
-def is_phone_blacklisted(phone: str, bl: dict) -> bool:
-    return phone in bl["phones"]
-
-def add_to_blacklist(user_id: int, phone: str, bl: dict):
-    if user_id not in bl["users"]:
-        bl["users"].append(user_id)
-    if phone not in bl["phones"]:
-        bl["phones"].append(phone)
-    save_blacklist(bl)
-
-def remove_user_blacklist(user_id: int, bl: dict):
-    if user_id in bl["users"]:
-        bl["users"].remove(user_id)
-    save_blacklist(bl)
