@@ -1,6 +1,7 @@
 import re
 import json
 import os
+import random
 
 PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
 BLACKLIST_FILE = "blacklist.json"
@@ -20,6 +21,10 @@ def validate_phone(phone: str) -> tuple:
 
 def mask_phone(phone: str) -> str:
     return phone[:2] + "******" + phone[-2:]
+
+def generate_code() -> str:
+    """Genere un code de verification a 4 chiffres."""
+    return str(random.randint(1000, 9999))
 
 def validate_code(code: str) -> tuple:
     code = code.strip()
