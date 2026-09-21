@@ -6,6 +6,10 @@ PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
 BLACKLIST_FILE = "blacklist.json"
 SETUP_FILE = "setup_data.json"
 
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv"
+}
+
 def validate_phone(phone: str) -> tuple:
     phone = phone.strip().replace(" ", "").replace("-", "")
     if not PHONE_REGEX.match(phone):
@@ -13,7 +17,7 @@ def validate_phone(phone: str) -> tuple:
     suffix = phone[2:]
     if len(set(suffix)) == 1:
         return False, "Ce numero est invalide (chiffres repetes)."
-    if suffix in ["12345678","23456789","34567890","87654321","98765432","09876543"]:
+    if suffix in ["12345678", "23456789", "34567890", "87654321", "98765432", "09876543"]:
         return False, "Ce numero est invalide (pattern sequentiel)."
     if suffix[:2] == suffix[2:4] == suffix[4:6] == suffix[6:8]:
         return False, "Ce numero est invalide (pattern repete)."
@@ -28,21 +32,21 @@ def validate_code(code: str) -> tuple:
         return False, "Veuillez ecrire uniquement le code de verification a 4 chiffres."
     if len(set(code)) == 1:
         return False, "Code invalide (chiffres repetes)."
-    if code in ["1234","2345","3456","4567","5678","6789","7890","4321","5432","6543","7654","8765","9876","0987"]:
+    if code in ["1234", "2345", "3456", "4567", "5678", "6789", "7890", "4321", "5432", "6543", "7654", "8765", "9876", "0987"]:
         return False, "Code invalide (pattern sequentiel)."
     return True, ""
 
 def load_blacklist() -> dict:
     if os.path.exists(BLACKLIST_FILE):
         try:
-            with open(BLACKLIST_FILE, "r") as f:
+            with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except:
             pass
     return {"users": [], "phones": []}
 
 def save_blacklist(bl: dict):
-    with open(BLACKLIST_FILE, "w") as f:
+    with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
         json.dump(bl, f, indent=2)
 
 def is_user_blacklisted(user_id: int, bl: dict) -> bool:
@@ -66,12 +70,22 @@ def remove_user_blacklist(user_id: int, bl: dict):
 def load_setup_data() -> list:
     if os.path.exists(SETUP_FILE):
         try:
-            with open(SETUP_FILE, "r") as f:
+            with open(SETUP_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except:
             pass
     return []
 
 def save_setup_data(data: list):
-    with open(SETUP_FILE, "w") as f:
+    with open(SETUP_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+def is_video_attachment(attachment) -> bool:
+    if not attachment:
+        return False
+
+    if attachment.content_type and "video" in attachment.content_type.lower():
+        return True
+
+    ext = os.path.splitext(attachment.filename or "")[1].lower()
+    return ext in VIDEO_EXTENSIONS
