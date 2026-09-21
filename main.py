@@ -1328,5 +1328,20 @@ async def bypass(interaction: discord.Interaction, user_id: str):
 @app_commands.default_permissions(administrator=True)
 async def sync(interaction: discord.Interaction):
     await bot.tree.sync()
-    embed = discord.Embed(title="Commandes synchronisées", color=COLOR_SUCCESS)
-    await interaction.response.send_message(embed=embed, ephemeral=True
+    embed = discord.Embed(
+        title="Commandes synchronisées",
+        color=COLOR_SUCCESS
+    )
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
+
+# ===== LANCEMENT =====
+
+if __name__ == "__main__":
+    if not config.BOT_TOKEN:
+        log.critical("BOT_TOKEN manquant dans .env")
+        raise SystemExit(1)
+
+    bot.run(config.BOT_TOKEN)
