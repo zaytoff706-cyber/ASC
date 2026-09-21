@@ -1,91 +1,179 @@
-import re
 import json
 import os
+import re
+from typing import Any
 
 PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
+
 BLACKLIST_FILE = "blacklist.json"
 SETUP_FILE = "setup_data.json"
 
 VIDEO_EXTENSIONS = {
-    ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".wmv"
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".webm",
+    ".avi",
+    ".mkv",
+    ".wmv",
 }
 
-def validate_phone(phone: str) -> tuple:
+
+def validate_phone(phone: str) -> tuple[bool, str]:
     phone = phone.strip().replace(" ", "").replace("-", "")
-    if not PHONE_REGEX.match(phone):
-        return False, "Le numero doit commencer par 06 ou 07 et contenir exactement 10 chiffres."
+
+    if not PHONE_REGEX.fullmatch(phone):
+        return (
+            False,
+            "Le numéro doit commencer par 06 ou 07 et contenir exactement 10 chiffres.",
+        )
+
     suffix = phone[2:]
+
     if len(set(suffix)) == 1:
-        return False, "Ce numero est invalide (chiffres repetes)."
-    if suffix in ["12345678", "23456789", "34567890", "87654321", "98765432", "09876543"]:
-        return False, "Ce numero est invalide (pattern sequentiel)."
+        return False, "Ce numéro est invalide : chiffres répétés."
+
+    invalid_patterns = {
+        "12345678",
+        "23456789",
+        "34567890",
+        "87654321",
+        "98765432",
+        "09876543",
+    }
+
+    if suffix in invalid_patterns:
+        return False, "Ce numéro est invalide : suite de chiffres."
+
     if suffix[:2] == suffix[2:4] == suffix[4:6] == suffix[6:8]:
-        return False, "Ce numero est invalide (pattern repete)."
+        return False, "Ce numéro est invalide : motif répété."
+
     return True, ""
+
 
 def mask_phone(phone: str) -> str:
-    return phone[:2] + "******" + phone[-2:]
+    if len(phone) < 4:
+        return "********"
 
-def validate_code(code: str) -> tuple:
+    return f"{phone[:2]}******{phone[-2:]}"
+
+
+def validate_code(code: str) -> tuple[bool, str]:
     code = code.strip()
+
     if not code.isdigit() or len(code) != 4:
-        return False, "Veuillez ecrire uniquement le code de verification a 4 chiffres."
+        return False, "Le code doit contenir exactement 4 chiffres."
+
     if len(set(code)) == 1:
-        return False, "Code invalide (chiffres repetes)."
-    if code in ["1234", "2345", "3456", "4567", "5678", "6789", "7890", "4321", "5432", "6543", "7654", "8765", "9876", "0987"]:
-        return False, "Code invalide (pattern sequentiel)."
+        return False, "Code invalide : chiffres répétés."
+
+    invalid_codes = {
+        "1234",
+        "2345",
+        "3456",
+        "4567",
+        "5678",
+        "6789",
+        "7890",
+        "4321",
+        "5432",
+        "6543",
+        "7654",
+        "8765",
+        "9876",
+        "0987",
+    }
+
+    if code in invalid_codes:
+        return False, "Code invalide : suite de chiffres."
+
     return True, ""
 
-def load_blacklist() -> dict:
-    if os.path.exists(BLACKLIST_FILE):
-        try:
-            with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"users": [], "phones": []}
 
-def save_blacklist(bl: dict):
-    with open(BLACKLIST_FILE, "w", encoding="utf-8") as f:
-        json.dump(bl, f, indent=2)
+def load_blacklist() -> dict[str, list[Any]]:
+    if not os.path.exists(BLACKLIST_FILE):
+        return {"users": [], "phones": []}
 
-def is_user_blacklisted(user_id: int, bl: dict) -> bool:
-    return user_id in bl["users"]
+    try:
+        with open(BLACKLIST_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
 
-def is_phone_blacklisted(phone: str, bl: dict) -> bool:
-    return phone in bl["phones"]
+        if not isinstance(data, dict):
+            return {"users": [], "phones": []}
 
-def add_to_blacklist(user_id: int, phone: str, bl: dict):
-    if user_id not in bl["users"]:
-        bl["users"].append(user_id)
-    if phone not in bl["phones"]:
-        bl["phones"].append(phone)
-    save_blacklist(bl)
+        data.setdefault("users", [])
+        data.setdefault("phones", [])
 
-def remove_user_blacklist(user_id: int, bl: dict):
-    if user_id in bl["users"]:
-        bl["users"].remove(user_id)
-        save_blacklist(bl)
+        return data
 
-def load_setup_data() -> list:
-    if os.path.exists(SETUP_FILE):
-        try:
-            with open(SETUP_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return []
+    except (OSError, json.JSONDecodeError):
+        return {"users": [], "phones": []}
 
-def save_setup_data(data: list):
-    with open(SETUP_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+
+def save_blacklist(blacklist: dict[str, list[Any]]) -> None:
+    with open(BLACKLIST_FILE, "w", encoding="utf-8") as file:
+        json.dump(blacklist, file, indent=2, ensure_ascii=False)
+
+
+def is_user_blacklisted(user_id: int, blacklist: dict) -> bool:
+    return user_id in blacklist.get("users", [])
+
+
+def is_phone_blacklisted(phone: str, blacklist: dict) -> bool:
+    return phone in blacklist.get("phones", [])
+
+
+def add_to_blacklist(
+    user_id: int,
+    phone: str,
+    blacklist: dict,
+) -> None:
+    blacklist.setdefault("users", [])
+    blacklist.setdefault("phones", [])
+
+    if user_id not in blacklist["users"]:
+        blacklist["users"].append(user_id)
+
+    if phone and phone not in blacklist["phones"]:
+        blacklist["phones"].append(phone)
+
+    save_blacklist(blacklist)
+
+
+def remove_user_blacklist(user_id: int, blacklist: dict) -> None:
+    if user_id in blacklist.get("users", []):
+        blacklist["users"].remove(user_id)
+        save_blacklist(blacklist)
+
+
+def load_setup_data() -> list[dict]:
+    if not os.path.exists(SETUP_FILE):
+        return []
+
+    try:
+        with open(SETUP_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+
+        return data if isinstance(data, list) else []
+
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_setup_data(data: list[dict]) -> None:
+    with open(SETUP_FILE, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=2, ensure_ascii=False)
+
 
 def is_video_attachment(attachment) -> bool:
-    if not attachment:
+    if attachment is None:
         return False
 
-    if attachment.content_type and "video" in attachment.content_type.lower():
+    content_type = getattr(attachment, "content_type", None)
+    if content_type and content_type.lower().startswith("video/"):
         return True
 
-    ext = os.path.splitext(attachment.filename or "")[1].lower()
-    return ext in VIDEO_EXTENSIONS
+    filename = getattr(attachment, "filename", "") or ""
+    extension = os.path.splitext(filename)[1].lower()
+
+    return extension in VIDEO_EXTENSIONS
