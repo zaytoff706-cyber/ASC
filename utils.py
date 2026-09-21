@@ -41,7 +41,7 @@ def load_blacklist() -> dict:
         try:
             with open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             pass
     return {"users": [], "phones": []}
 
@@ -72,7 +72,7 @@ def load_setup_data() -> list:
         try:
             with open(SETUP_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except Exception:
             pass
     return []
 
