@@ -1,4 +1,4 @@
-"""Commande /annonce pour publier des embeds personnalisés de manière transparente."""
+"""Commande /annonce pour publier des embeds personnalisés."""
 
 from urllib.parse import urlparse
 
@@ -69,7 +69,9 @@ class Announcement(commands.Cog):
         image_url = image_url.strip() if image_url else None
         thumbnail_url = thumbnail_url.strip() if thumbnail_url else None
 
-        if not valid_url(image_url) or not valid_url(thumbnail_url):
+        if (image_url is not None and not valid_url(image_url)) or (
+            thumbnail_url is not None and not valid_url(thumbnail_url)
+        ):
             await interaction.response.send_message(
                 "Les URLs doivent commencer par http:// ou https://.",
                 ephemeral=True,
