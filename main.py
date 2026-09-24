@@ -261,55 +261,62 @@ class StaffPanelView(discord.ui.View):
         self.auto_close_task: Optional[asyncio.Task] = None
         self.claim_view: Optional[StaffClaimView] = None
 
-    async def close_ticket(
-    self,
-    status_text: str = "Fermé",
-    do_ban: bool = False,
-    reason: str = "Vérification fermée",
-):
-    pending_verifications.pop(self.user_id, None)
-    cooldowns.pop(self.user_id, None)
+        async def close_ticket(
+        self,
+        status_text: str = "Fermé",
+        do_ban: bool = False,
+        reason: str = "Vérification fermée",
+    ):
+        pending_verifications.pop(self.user_id, None)
+        cooldowns.pop(self.user_id, None)
 
-    if self.claimed_by and self.claimed_by in staff_active_claims:
-        staff_active_claims.pop(self.claimed_by, None)
+        if self.claimed_by and self.claimed_by in staff_active_claims:
+            staff_active_claims.pop(self.claimed_by, None)
 
-    self.closed = True
+        self.closed = True
 
-    # Aucun bannissement automatique.
-    if do_ban:
-        log.warning(
-            "Bannissement ignoré pour %s : les bans automatiques sont désactivés.",
-            self.user_id,
-        )
+        # Aucun bannissement automatique.
+        if do_ban:
+            log.warning(
+                "Bannissement ignoré pour %s : les bans automatiques sont désactivés.",
+                self.user_id,
+            )
 
-    if self.auto_close_task:
-        self.auto_close_task.cancel()
-        self.auto_close_task = None
+        if self.auto_close_task:
+            self.auto_close_task.cancel()
+            self.auto_close_task = None
 
-    for child in self.children:
-        if isinstance(child, discord.ui.Button):
-            child.disabled = True
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
 
-    try:
-        user_fetch = await bot.fetch_user(self.user_id)
+        try:
+            user_fetch = await bot.fetch_user(self.user_id)
 
-        new_embed = build_staff_embed(
-            user=user_fetch,
-            phone=self.phone,
-            status=status_text,
-            claimed_by=self.claimed_by,
-            code_requested=self.code_requested,
-            timestamp=self.message.created_at if self.message else None,
-        )
+            new_embed = build_staff_embed(
+                user=user_fetch,
+                phone=self.phone,
+                status=status_text,
+                claimed_by=self.claimed_by,
+                code_requested=self.code_requested,
+                timestamp=(
+                    self.message.created_at
+                    if self.message
+                    else datetime.datetime.now()
+                ),
+            )
 
-        new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-        new_embed.color = COLOR_WARNING
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            new_embed.color = COLOR_WARNING
 
-        if self.message:
-            await self.message.edit(embed=new_embed, view=self)
+            if self.message:
+                await self.message.edit(embed=new_embed, view=self)
 
-    except Exception:
-        log.exception("Impossible de mettre à jour le ticket %s", self.user_id)
+        except Exception:
+            log.exception(
+                "Impossible de mettre à jour le ticket de %s",
+                self.user_id,
+            )
         
     async def start_auto_close(self):
         try:
