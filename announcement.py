@@ -1,3 +1,4 @@
+# announcement.py
 """Commande /annonce pour publier un embed visible par les membres."""
 
 from urllib.parse import urlparse
