@@ -249,38 +249,111 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
 
 # ===== STAFF PANEL VIEW =====
 
+def build_staff_embed_safe(
+    user: discord.User,
+    status: str,
+    claimed_by: Optional[int] = None,
+    proof_requested: bool = False,
+    proof_received: bool = False,
+    timestamp: Optional[datetime.datetime] = None,
+) -> discord.Embed:
+    if timestamp is None:
+        timestamp = datetime.datetime.now()
+
+    embed = discord.Embed(
+        title="NOUVELLE DEMANDE DE VÉRIFICATION",
+        colour=COLOR_SUCCESS if proof_received else COLOR_WARNING,
+        timestamp=timestamp,
+    )
+
+    embed.set_thumbnail(url=user.display_avatar.url)
+
+    embed.add_field(
+        name="Utilisateur",
+        value=user.mention,
+        inline=True,
+    )
+    embed.add_field(
+        name="ID Discord",
+        value=f"`{user.id}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Statut",
+        value=status,
+        inline=True,
+    )
+    embed.add_field(
+        name="Staff",
+        value=f"<@{claimed_by}>" if claimed_by else "*Personne*",
+        inline=True,
+    )
+    embed.add_field(
+        name="Preuve demandée",
+        value="Oui" if proof_requested else "Non",
+        inline=True,
+    )
+    embed.add_field(
+        name="Vidéo reçue",
+        value="Oui" if proof_received else "Non",
+        inline=True,
+    )
+
+    embed.set_footer(
+        text="Aucun numéro, code SMS ou donnée bancaire n'est demandé."
+    )
+
+    return embed
+
+
 class StaffPanelView(discord.ui.View):
-    def __init__(self, user_id: int, phone: str):
+    def __init__(self, user_id: int):
         super().__init__(timeout=None)
+
         self.user_id = user_id
-        self.phone = phone
         self.claimed_by: Optional[int] = None
-        self.code_requested = False
+        self.proof_requested = False
         self.closed = False
+        self.proof_received = False
         self.message: Optional[discord.Message] = None
         self.auto_close_task: Optional[asyncio.Task] = None
-        self.claim_view: Optional[StaffClaimView] = None
 
-        async def close_ticket(
+    async def update_panel(
         self,
-        status_text: str = "Fermé",
-        do_ban: bool = False,
-        reason: str = "Vérification fermée",
+        status_text: str,
+        colour: int,
     ):
-        pending_verifications.pop(self.user_id, None)
-        cooldowns.pop(self.user_id, None)
+        try:
+            user_fetch = await bot.fetch_user(self.user_id)
 
-        if self.claimed_by and self.claimed_by in staff_active_claims:
-            staff_active_claims.pop(self.claimed_by, None)
+            embed = build_staff_embed_safe(
+                user=user_fetch,
+                status=status_text,
+                claimed_by=self.claimed_by,
+                proof_requested=self.proof_requested,
+                proof_received=self.proof_received,
+                timestamp=self.message.created_at if self.message else None,
+            )
 
-        self.closed = True
+            embed.colour = colour
 
-        # Aucun bannissement automatique.
-        if do_ban:
-            log.warning(
-                "Bannissement ignoré pour %s : les bans automatiques sont désactivés.",
+            if self.message:
+                await self.message.edit(embed=embed, view=self)
+
+        except Exception:
+            log.exception(
+                "Impossible de mettre à jour le panneau de %s",
                 self.user_id,
             )
+
+    async def close_ticket(
+        self,
+        status_text: str = "Fermé",
+    ):
+        self.closed = True
+
+        if self.claimed_by in staff_active_claims:
+            staff_active_claims.pop(self.claimed_by, None)
 
         if self.auto_close_task:
             self.auto_close_task.cancel()
@@ -290,227 +363,237 @@ class StaffPanelView(discord.ui.View):
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
 
-        try:
-            user_fetch = await bot.fetch_user(self.user_id)
+        await self.update_panel(
+            status_text=status_text,
+            colour=COLOR_WARNING,
+        )
 
-            new_embed = build_staff_embed(
-                user=user_fetch,
-                phone=self.phone,
-                status=status_text,
-                claimed_by=self.claimed_by,
-                code_requested=self.code_requested,
-                timestamp=(
-                    self.message.created_at
-                    if self.message
-                    else datetime.datetime.now()
-                ),
-            )
-
-            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-            new_embed.color = COLOR_WARNING
-
-            if self.message:
-                await self.message.edit(embed=new_embed, view=self)
-
-        except Exception:
-            log.exception(
-                "Impossible de mettre à jour le ticket de %s",
-                self.user_id,
-            )
-        
     async def start_auto_close(self):
         try:
             await asyncio.sleep(300)
-            if not self.closed and not self.code_requested and self.claimed_by is not None:
-                await self.close_ticket("Fermé automatiquement (5 min)", do_ban=False)
+
+            if (
+                not self.closed
+                and not self.proof_requested
+                and self.claimed_by is not None
+            ):
+                await self.close_ticket(
+                    "Fermé automatiquement après expiration",
+                )
+
         except asyncio.CancelledError:
             pass
 
-    @discord.ui.button(label="Prendre en charge", style=discord.ButtonStyle.primary, custom_id="claim_btn")
-    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is not None:
-            embed = discord.Embed(title="Déjà pris", description=f"Un maker est déjà sur le coup (<@{self.claimed_by}>).", color=COLOR_DANGER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+    @discord.ui.button(
+        label="Prendre en charge",
+        style=discord.ButtonStyle.primary,
+        custom_id="claim_btn",
+    )
+    async def claim_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         if self.closed:
-            embed = discord.Embed(title="Fermé", description="Cette vérification est déjà fermée.", color=COLOR_DANGER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(
+                "Cette demande est déjà fermée.",
+                ephemeral=True,
+            )
             return
+
+        if self.claimed_by is not None:
+            await interaction.response.send_message(
+                f"Cette demande est déjà prise par <@{self.claimed_by}>.",
+                ephemeral=True,
+            )
+            return
+
         staff_id = interaction.user.id
+
         if staff_id in staff_active_claims:
             old_data = staff_active_claims[staff_id]
+
             try:
                 old_view = old_data["view"]
-                await old_view.close_ticket("Fermé (nouveau claim)", do_ban=False)
-            except:
-                pass
-        staff_active_claims[staff_id] = {"view": self, "user_id": self.user_id}
+                await old_view.close_ticket(
+                    "Fermé automatiquement : nouveau claim",
+                )
+            except Exception:
+                log.exception("Impossible de fermer l'ancien claim")
+
         self.claimed_by = staff_id
+        staff_active_claims[staff_id] = {
+            "view": self,
+            "user_id": self.user_id,
+        }
+
         button.disabled = True
         button.label = "Déjà pris"
         button.style = discord.ButtonStyle.secondary
 
-        # Message éphémère avec le numéro + bouton copier
-        embed_reveal = discord.Embed(
-            title="🔓 Numéro débloqué",
-            description=f"```\n{self.phone}\n```\n*Cliquez sur « 📋 Copier » pour copier facilement.*",
-            color=COLOR_SUCCESS,
-            timestamp=datetime.datetime.now()
+        await interaction.response.edit_message(
+            view=self,
         )
-        embed_reveal.set_footer(text="Ne partagez pas ce numéro")
-        self.claim_view = StaffClaimView(self.phone, self.user_id, self)
-        await interaction.response.send_message(embed=embed_reveal, view=self.claim_view, ephemeral=True)
 
-        # Mettre à jour le panneau staff principal
-        user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="En cours", claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=interaction.message.created_at)
-        new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-        await interaction.message.edit(embed=new_embed, view=self)
-        self.auto_close_task = asyncio.create_task(self.start_auto_close())
+        if self.auto_close_task:
+            self.auto_close_task.cancel()
 
-    @discord.ui.button(label="Demander le code", style=discord.ButtonStyle.success, custom_id="request_code_btn")
-    async def request_code_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is None:
-            embed = discord.Embed(title="Action impossible", description="Prenez d'abord la vérification en charge.", color=COLOR_WARNING)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        if self.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="Action impossible", description=f"Seul <@{self.claimed_by}> peut demander le code.", color=COLOR_DANGER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        if self.code_requested:
-            embed = discord.Embed(title="Déjà demandé", description="Le code a déjà été demandé à cet utilisateur.", color=COLOR_WARNING)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+        self.auto_close_task = asyncio.create_task(
+            self.start_auto_close()
+        )
+
+        await self.update_panel(
+            status_text="En cours",
+            colour=COLOR_WARNING,
+        )
+
+    @discord.ui.button(
+        label="Demander une preuve vidéo",
+        style=discord.ButtonStyle.success,
+        custom_id="request_proof_btn",
+    )
+    async def request_proof_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         if self.closed:
-            embed = discord.Embed(title="Fermé", description="Cette vérification est fermée.", color=COLOR_DANGER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(
+                "Cette demande est déjà fermée.",
+                ephemeral=True,
+            )
             return
+
+        if self.claimed_by is None:
+            await interaction.response.send_message(
+                "Prenez d'abord la demande en charge.",
+                ephemeral=True,
+            )
+            return
+
+        if self.claimed_by != interaction.user.id:
+            await interaction.response.send_message(
+                f"Seul <@{self.claimed_by}> peut demander la preuve.",
+                ephemeral=True,
+            )
+            return
+
+        if self.proof_requested:
+            await interaction.response.send_message(
+                "La preuve vidéo a déjà été demandée.",
+                ephemeral=True,
+            )
+            return
+
+        self.proof_requested = True
+
         if self.auto_close_task:
             self.auto_close_task.cancel()
             self.auto_close_task = None
-        self.code_requested = True
-        pending_verifications[self.user_id] = {
-            "phone": self.phone,
-            "claimed_by": interaction.user.id
-        }
-        embed_confirm = discord.Embed(
-            title="Message envoyé",
-            description="Un message a été envoyé à l'utilisateur pour demander le code.",
-            color=COLOR_SUCCESS,
-            timestamp=datetime.datetime.now()
-        )
-        await interaction.response.send_message(embed=embed_confirm, ephemeral=True)
 
-        # Log dans le salon de logs
-        log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
-        if log_channel:
-            embed_log = discord.Embed(
-                title="CODE DEMANDÉ",
-                description="Code demandé pour un utilisateur.",
-                color=COLOR_WARNING,
-                timestamp=datetime.datetime.now()
-            )
-            embed_log.add_field(name="Staff", value=f"<@{interaction.user.id}>", inline=True)
-            embed_log.add_field(name="Utilisateur", value=f"<@{self.user_id}> (`{self.user_id}`)", inline=True)
-            embed_log.add_field(name="Numéro", value=f"||{self.phone}||", inline=True)
-            embed_log.add_field(name="Date", value=datetime.datetime.now().strftime("%d/%m/%Y %H:%M"), inline=True)
-            embed_log.set_footer(text="Logs de vérification")
-            await log_channel.send(embed=embed_log)
-
-        # Envoyer le DM à l'utilisateur
         try:
             user = await bot.fetch_user(self.user_id)
-            embed_dm = discord.Embed(
-                title="Code de vérification",
-                description=(
-                    "N'ayez pas peur, c'est une simple vérification pour prouver votre âge.\n\n"
-                    "Comme quand on relie une carte bancaire à PayPal, un prélèvement de 0 € est effectué "
-                    "pour vérifier que le compte est valide.\n\n"
-                    "Aucun débit ne sera fait sur votre facture téléphone. Le SMS reçu est juste un code de confirmation.\n\n"
-                    "Une fois le code reçu, répondez à ce message avec le code à 4 chiffres."
-                ),
-                color=0x5865f2
+
+            await user.send(
+                "Le staff vous demande une preuve vidéo. "
+                "Envoyez uniquement une vidéo, sans numéro de téléphone, "
+                "code SMS ou donnée bancaire."
             )
-            embed_dm.set_footer(text="Répondez avec le code • 0,00 €")
-            await user.send(embed=embed_dm)
+
+            await interaction.response.send_message(
+                "Demande de preuve vidéo envoyée.",
+                ephemeral=True,
+            )
+
         except discord.Forbidden:
-            embed_fail = discord.Embed(title="Erreur", description=f"<@{self.user_id}> a ses MP fermés. Contactez-le manuellement.", color=COLOR_DANGER)
-            await interaction.followup.send(embed=embed_fail, ephemeral=True)
-            pending_verifications.pop(self.user_id, None)
-            self.code_requested = False
+            self.proof_requested = False
+
+            await interaction.response.send_message(
+                "Impossible d'envoyer un message privé à cet utilisateur.",
+                ephemeral=True,
+            )
             return
 
-        # Mettre à jour l'embed du panneau staff
-        user_fetch = await bot.fetch_user(self.user_id)
-        new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Code demandé - en attente", claimed_by=self.claimed_by, code_requested=True, timestamp=interaction.message.created_at)
-        new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-        await interaction.message.edit(embed=new_embed, view=self)
+        await self.update_panel(
+            status_text="Preuve vidéo demandée",
+            colour=COLOR_WARNING,
+        )
 
-    @discord.ui.button(label="✅ Work (scam confirmé)", style=discord.ButtonStyle.danger, custom_id="work_btn")
-    async def work_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is None:
-            embed = discord.Embed(title="Action impossible", description="Prenez d'abord la vérification en charge.", color=COLOR_WARNING)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        if self.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="Action impossible", description=f"Seul <@{self.claimed_by}> peut utiliser ce bouton.", color=COLOR_DANGER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+    @discord.ui.button(
+        label="✅ Work",
+        style=discord.ButtonStyle.success,
+        custom_id="work_btn",
+    )
+    async def work_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         if self.closed:
-            embed = discord.Embed(title="Déjà fermé", description="Cette vérification est déjà fermée.", color=COLOR_WARNING)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(
+                "Cette demande est déjà fermée.",
+                ephemeral=True,
+            )
             return
+
+        if self.claimed_by is None:
+            await interaction.response.send_message(
+                "Prenez d'abord la demande en charge.",
+                ephemeral=True,
+            )
+            return
+
+        if self.claimed_by != interaction.user.id:
+            await interaction.response.send_message(
+                f"Seul <@{self.claimed_by}> peut utiliser ce bouton.",
+                ephemeral=True,
+            )
+            return
+
         await self.close_ticket(
             "Preuve traitée - Work",
-            do_ban=False,
-            reason="Traitement effectué par le staff",
-         )
-
-         embed = discord.Embed(
-            title="Preuve traitée",
-            description=f"La demande de <@{self.user_id}> a été traitée. Aucun bannissement automatique n'a été effectué.",
-            color=COLOR_SUCCESS,
         )
 
-    @discord.ui.button(label="Fermer", style=discord.ButtonStyle.grey, custom_id="close_btn")
-    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.claimed_by is not None and self.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="Action impossible", description=f"Seul <@{self.claimed_by}> peut fermer cette vérification.", color=COLOR_DANGER)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+        await interaction.response.send_message(
+            "Preuve traitée. Aucun bannissement automatique n'a été effectué.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
+        label="Fermer",
+        style=discord.ButtonStyle.secondary,
+        custom_id="close_btn",
+    )
+    async def close_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
         if self.closed:
-            embed = discord.Embed(title="Déjà fermé", description="Cette vérification est déjà fermée.", color=COLOR_WARNING)
-            await interaction.response.send_message(embed=embed, ephemeral=True)
+            await interaction.response.send_message(
+                "Cette demande est déjà fermée.",
+                ephemeral=True,
+            )
             return
+
+        if (
+            self.claimed_by is not None
+            and self.claimed_by != interaction.user.id
+        ):
+            await interaction.response.send_message(
+                f"Seul <@{self.claimed_by}> peut fermer cette demande.",
+                ephemeral=True,
+            )
+            return
+
         await self.close_ticket(
             "Fermé par le staff",
-            do_ban=False,
-            reason="Ticket fermé par le staff",
         )
 
-        embed = discord.Embed(
-            title="Vérification fermée",
-            description=f"La demande de <@{self.user_id}> a été fermée. Aucun bannissement automatique n'a été effectué.",
-            color=COLOR_WARNING,
-       )
-
-# ===== ENVOYER PANEL STAFF =====
-
-async def send_staff_panel(user: discord.User, phone: str):
-    guild = bot.get_guild(config.STAFF_GUILD_ID)
-    if not guild:
-        log.error(f"Staff guild {config.STAFF_GUILD_ID} introuvable.")
-        return
-    channel = guild.get_channel(config.STAFF_CHANNEL_ID)
-    if not channel:
-        log.error(f"Staff channel {config.STAFF_CHANNEL_ID} introuvable.")
-        return
-    view = StaffPanelView(user.id, phone)
-    embed = build_staff_embed(user=user, phone=phone, status="En attente", claimed_by=None, code_requested=False)
-    embed.set_thumbnail(url=user.display_avatar.url)
-    msg = await channel.send(content="@everyone", embed=embed, view=view)
-    view.message = msg
+        await interaction.response.send_message(
+            "Demande fermée. Aucun bannissement automatique n'a été effectué.",
+            ephemeral=True,
+        )
 
 # ===== VALIDATION CHANNEL =====
 
