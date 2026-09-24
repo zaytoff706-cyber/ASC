@@ -55,18 +55,22 @@ class Announcement(commands.Cog):
         if not interaction.guild or not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Commande réservée aux administrateurs.", ephemeral=True)
             return
+
         image_url = image_url.strip() if image_url else None
         if not is_valid_url(image_url):
             await interaction.response.send_message("L'URL doit commencer par http:// ou https://.", ephemeral=True)
             return
+
         embed = discord.Embed(
             title=titre[:256],
             description=description[:4096],
             colour=COLOURS[couleur.value],
             timestamp=discord.utils.utcnow(),
         )
+
         if image_url:
             embed.set_image(url=image_url)
+
         embed.set_footer(text="Annonce publiée par le bot")
         await interaction.response.send_message("Annonce publiée.", ephemeral=True)
         await interaction.channel.send(embed=embed)
