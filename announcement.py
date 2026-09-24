@@ -1,4 +1,4 @@
-"""Commande /annonce pour publier des embeds personnalisés."""
+"""Commande /annonce pour publier un embed visible par les membres."""
 
 from urllib.parse import urlparse
 
@@ -17,13 +17,10 @@ COLOURS = {
 }
 
 
-def valid_url(value: str | None) -> bool:
+def is_valid_url(value: str | None) -> bool:
     if not value:
         return True
-    value = value.strip()
-    if not value:
-        return True
-    parsed = urlparse(value)
+    parsed = urlparse(value.strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
@@ -35,21 +32,18 @@ class Announcement(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     @app_commands.describe(
         titre="Titre de l'annonce",
-        description="Contenu de l'annonce",
+        description="Description de l'annonce",
         couleur="Couleur de l'embed",
-        image_url="URL de l'image principale (facultatif)",
-        thumbnail_url="URL de la petite image (facultative)",
+        image_url="URL HTTPS d'une image facultative",
     )
-    @app_commands.choices(
-        couleur=[
-            app_commands.Choice(name="Rouge", value="red"),
-            app_commands.Choice(name="Jaune", value="yellow"),
-            app_commands.Choice(name="Vert", value="green"),
-            app_commands.Choice(name="Bleu", value="blue"),
-            app_commands.Choice(name="Violet", value="purple"),
-            app_commands.Choice(name="Orange", value="orange"),
-        ]
-    )
+    @app_commands.choices(couleur=[
+        app_commands.Choice(name="Rouge", value="red"),
+        app_commands.Choice(name="Jaune", value="yellow"),
+        app_commands.Choice(name="Vert", value="green"),
+        app_commands.Choice(name="Bleu", value="blue"),
+        app_commands.Choice(name="Violet", value="purple"),
+        app_commands.Choice(name="Orange", value="orange"),
+    ])
     async def annonce(
         self,
         interaction: discord.Interaction,
@@ -57,41 +51,23 @@ class Announcement(commands.Cog):
         description: str,
         couleur: app_commands.Choice[str],
         image_url: str | None = None,
-        thumbnail_url: str | None = None,
     ):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "Tu dois être administrateur pour utiliser cette commande.",
-                ephemeral=True,
-            )
+        if not interaction.guild or not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Commande réservée aux administrateurs.", ephemeral=True)
             return
-
         image_url = image_url.strip() if image_url else None
-        thumbnail_url = thumbnail_url.strip() if thumbnail_url else None
-
-        if (image_url is not None and not valid_url(image_url)) or (
-            thumbnail_url is not None and not valid_url(thumbnail_url)
-        ):
-            await interaction.response.send_message(
-                "Les URLs doivent commencer par http:// ou https://.",
-                ephemeral=True,
-            )
+        if not is_valid_url(image_url):
+            await interaction.response.send_message("L'URL doit commencer par http:// ou https://.", ephemeral=True)
             return
-
         embed = discord.Embed(
             title=titre[:256],
             description=description[:4096],
-            colour=COLOURS.get(couleur.value, COLOURS["blue"]),
+            colour=COLOURS[couleur.value],
             timestamp=discord.utils.utcnow(),
         )
-
         if image_url:
             embed.set_image(url=image_url)
-        if thumbnail_url:
-            embed.set_thumbnail(url=thumbnail_url)
-
         embed.set_footer(text="Annonce publiée par le bot")
-
         await interaction.response.send_message("Annonce publiée.", ephemeral=True)
         await interaction.channel.send(embed=embed)
 
