@@ -20,7 +20,10 @@ COLOURS = {
 def valid_url(value: str | None) -> bool:
     if not value:
         return True
-    parsed = urlparse(value.strip())
+    value = value.strip()
+    if not value:
+        return True
+    parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
@@ -34,8 +37,8 @@ class Announcement(commands.Cog):
         titre="Titre de l'annonce",
         description="Contenu de l'annonce",
         couleur="Couleur de l'embed",
-        image_url="URL HTTPS de l'image principale (facultatif)",
-        thumbnail_url="URL HTTPS de la petite image latérale (facultatif)",
+        image_url="URL de l'image principale (facultatif)",
+        thumbnail_url="URL de la petite image (facultative)",
     )
     @app_commands.choices(
         couleur=[
@@ -58,13 +61,14 @@ class Announcement(commands.Cog):
     ):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(
-                "Vous devez être administrateur pour utiliser cette commande.",
+                "Tu dois être administrateur pour utiliser cette commande.",
                 ephemeral=True,
             )
             return
 
         image_url = image_url.strip() if image_url else None
         thumbnail_url = thumbnail_url.strip() if thumbnail_url else None
+
         if not valid_url(image_url) or not valid_url(thumbnail_url):
             await interaction.response.send_message(
                 "Les URLs doivent commencer par http:// ou https://.",
@@ -78,14 +82,14 @@ class Announcement(commands.Cog):
             colour=COLOURS.get(couleur.value, COLOURS["blue"]),
             timestamp=discord.utils.utcnow(),
         )
+
         if image_url:
             embed.set_image(url=image_url)
         if thumbnail_url:
             embed.set_thumbnail(url=thumbnail_url)
+
         embed.set_footer(text="Annonce publiée par le bot")
 
-        # L'interaction est confirmée séparément ; l'annonce reste visible comme
-        # un message normal envoyé par le bot dans le salon courant.
         await interaction.response.send_message("Annonce publiée.", ephemeral=True)
         await interaction.channel.send(embed=embed)
 
