@@ -872,14 +872,18 @@ async def sync(interaction: discord.Interaction):
 
 # ===== EVENTS =====
 
+
+
 @bot.event
 async def on_ready():
     log.info(f"Connecté : {bot.user}")
+
     try:
         await bot.load_extension("announcement")
         log.info("Extension announcement chargée.")
     except Exception as e:
         log.exception("Erreur lors du chargement de l'extension announcement: %s", e)
+
     await bot.tree.sync()
     log.info("Commandes slash synchronisées.")
 
