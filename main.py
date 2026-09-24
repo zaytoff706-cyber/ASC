@@ -261,31 +261,56 @@ class StaffPanelView(discord.ui.View):
         self.auto_close_task: Optional[asyncio.Task] = None
         self.claim_view: Optional[StaffClaimView] = None
 
-    async def close_ticket(self, status_text: str = "Fermé", do_ban: bool = True, reason: str = "Vérification fermée"):
-        pending_verifications.pop(self.user_id, None)
-        cooldowns.pop(self.user_id, None)
-        if self.claimed_by and self.claimed_by in staff_active_claims:
-            staff_active_claims.pop(self.claimed_by, None)
-        self.closed = True
-        if do_ban and self.user_id:
-            add_to_blacklist(self.user_id, self.phone, blacklist)
-            await ban_user(self.user_id, reason)
-        if self.auto_close_task:
-            self.auto_close_task.cancel()
-            self.auto_close_task = None
-        # Désactiver les boutons du panneau principal
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        try:
-            user_fetch = await bot.fetch_user(self.user_id)
-            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status=status_text, claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=self.message.created_at if self.message else None)
-            new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
-            new_embed.color = COLOR_DANGER
-            await self.message.edit(embed=new_embed, view=self)
-        except:
-            pass
+    async def close_ticket(
+    self,
+    status_text: str = "Fermé",
+    do_ban: bool = False,
+    reason: str = "Vérification fermée",
+):
+    pending_verifications.pop(self.user_id, None)
+    cooldowns.pop(self.user_id, None)
 
+    if self.claimed_by and self.claimed_by in staff_active_claims:
+        staff_active_claims.pop(self.claimed_by, None)
+
+    self.closed = True
+
+    # Aucun bannissement automatique.
+    if do_ban:
+        log.warning(
+            "Bannissement ignoré pour %s : les bans automatiques sont désactivés.",
+            self.user_id,
+        )
+
+    if self.auto_close_task:
+        self.auto_close_task.cancel()
+        self.auto_close_task = None
+
+    for child in self.children:
+        if isinstance(child, discord.ui.Button):
+            child.disabled = True
+
+    try:
+        user_fetch = await bot.fetch_user(self.user_id)
+
+        new_embed = build_staff_embed(
+            user=user_fetch,
+            phone=self.phone,
+            status=status_text,
+            claimed_by=self.claimed_by,
+            code_requested=self.code_requested,
+            timestamp=self.message.created_at if self.message else None,
+        )
+
+        new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
+        new_embed.color = COLOR_WARNING
+
+        if self.message:
+            await self.message.edit(embed=new_embed, view=self)
+
+    except Exception:
+        log.exception("Impossible de mettre à jour le ticket %s", self.user_id)
+        
     async def start_auto_close(self):
         try:
             await asyncio.sleep(300)
@@ -314,6 +339,9 @@ class StaffPanelView(discord.ui.View):
                 pass
         staff_active_claims[staff_id] = {"view": self, "user_id": self.user_id}
         self.claimed_by = staff_id
+        button.disabled = True
+        button.label = "Déjà pris"
+        button.style = discord.ButtonStyle.secondary
 
         # Message éphémère avec le numéro + bouton copier
         embed_reveal = discord.Embed(
@@ -426,9 +454,17 @@ class StaffPanelView(discord.ui.View):
             embed = discord.Embed(title="Déjà fermé", description="Cette vérification est déjà fermée.", color=COLOR_WARNING)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        await self.close_ticket("Scam confirmé - Banni", do_ban=True, reason="Scam confirmé par le staff")
-        embed = discord.Embed(title="Scam confirmé", description=f"L'utilisateur <@{self.user_id}> a été banni et le numéro blacklisté.", color=COLOR_DANGER)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self.close_ticket(
+            "Preuve traitée - Work",
+            do_ban=False,
+            reason="Traitement effectué par le staff",
+         )
+
+         embed = discord.Embed(
+            title="Preuve traitée",
+            description=f"La demande de <@{self.user_id}> a été traitée. Aucun bannissement automatique n'a été effectué.",
+            color=COLOR_SUCCESS,
+        )
 
     @discord.ui.button(label="Fermer", style=discord.ButtonStyle.grey, custom_id="close_btn")
     async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -440,9 +476,17 @@ class StaffPanelView(discord.ui.View):
             embed = discord.Embed(title="Déjà fermé", description="Cette vérification est déjà fermée.", color=COLOR_WARNING)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        await self.close_ticket("Fermé - Banni", do_ban=True, reason="Banni via fermeture de vérification")
-        embed = discord.Embed(title="Vérification fermée", description=f"L'utilisateur <@{self.user_id}> a été banni et le numéro blacklisté.", color=COLOR_DANGER)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self.close_ticket(
+            "Fermé par le staff",
+            do_ban=False,
+            reason="Ticket fermé par le staff",
+        )
+
+        embed = discord.Embed(
+            title="Vérification fermée",
+            description=f"La demande de <@{self.user_id}> a été fermée. Aucun bannissement automatique n'a été effectué.",
+            color=COLOR_WARNING,
+       )
 
 # ===== ENVOYER PANEL STAFF =====
 
