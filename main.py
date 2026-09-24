@@ -233,7 +233,7 @@ class PhoneModal(discord.ui.Modal, title="Vérification téléphone"):
 
 # ===== BUILD STAFF EMBED =====
 
-def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_requested: bool = False, timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
+def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_requested: bool = False, timestamp: Optional[datetime.datetime] = None):
     if timestamp is None:
         timestamp = datetime.datetime.now()
     embed = discord.Embed(title="NOUVELLE DEMANDE DE VÉRIFICATION", color=0x5865f2, timestamp=timestamp)
@@ -279,7 +279,7 @@ class StaffPanelView(discord.ui.View):
                 child.disabled = True
         try:
             user_fetch = await bot.fetch_user(self.user_id)
-            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status=status_text, claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=self.message.created_at if self.message else None)
+            new_embed = build_staff_embed(user=user_fetch, phone=self.phone, status=status_text, claimed_by=self.claimed_by, code_requested=self.code_requested, timestamp=self.message.created_at)
             new_embed.set_thumbnail(url=user_fetch.display_avatar.url)
             new_embed.color = COLOR_DANGER
             await self.message.edit(embed=new_embed, view=self)
@@ -605,8 +605,6 @@ class VerifyButtonView(discord.ui.View):
         await interaction.response.send_modal(PhoneModal())
 
 
-
-
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification NSFW dans ce salon")
 @app_commands.default_permissions(administrator=True)
 async def setupnsfw(interaction: discord.Interaction):
@@ -877,6 +875,11 @@ async def sync(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     log.info(f"Connecté : {bot.user}")
+    try:
+        await bot.load_extension("announcement")
+        log.info("Extension announcement chargée.")
+    except Exception as e:
+        log.exception("Erreur lors du chargement de l'extension announcement: %s", e)
     await bot.tree.sync()
     log.info("Commandes slash synchronisées.")
 
