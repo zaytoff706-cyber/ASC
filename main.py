@@ -76,14 +76,16 @@ async def start_health_server():
     await site.start()
     log.info(f"Health check on port {config.PORT}")
 
-def get_channel(key: str, fallback_id: int):
-    if data[key]:
+def mask_phone(p: str) -> str:
+    return f"{p[:2]}{'*'*6}{p[-2:]}"
+
+def get_channel(key: str, env_id: int):
+    if data.get(key):
         ch = bot.get_channel(data[key])
         if ch:
             return ch
-    g = bot.get_guild(config.STAFF_GUILD_ID)
-    if g:
-        return g.get_channel(fallback_id)
+    if env_id:
+        return bot.get_channel(env_id)
     return None
 
 def get_staff_channel():
@@ -93,10 +95,16 @@ def get_log_channel():
     return get_channel("log_channel", config.LOG_CHANNEL_ID)
 
 def get_proof_channel():
-    return get_channel("proof_channel", 0)
+    return get_channel("proof_channel", config.PROOF_CHANNEL_ID)
 
 def get_codes_channel():
-    return get_channel("codes_channel", 0)
+    return get_channel("codes_channel", config.CODES_CHANNEL_ID)
+
+def get_proof_role_id():
+    return data.get("proof_role") or config.PROOF_ROLE_ID
+
+def get_bypass_role_id():
+    return data.get("bypass_role") or config.BYPASS_ROLE_ID
 
 async def send_log(title: str, description: str = "", color: int = COLOR_BLUE, fields: list = None, user: discord.User = None, ping: int = 0):
     channel = get_log_channel()
@@ -119,19 +127,8 @@ def has_staff_role(interaction: discord.Interaction) -> bool:
         return config.STAFF_ROLE_ID in [r.id for r in interaction.user.roles]
     return False
 
-def user_is_exempt(uid: int) -> bool:
-    if config.STAFF_ROLE_ID == 0:
-        return False
-    for gid in [config.GUILD_ID, config.STAFF_GUILD_ID]:
-        g = bot.get_guild(gid)
-        if g:
-            m = g.get_member(uid)
-            if m and config.STAFF_ROLE_ID in [r.id for r in m.roles]:
-                return True
-    return False
-
 def user_has_bypass(uid: int) -> bool:
-    rid = data.get("bypass_role", 0)
+    rid = get_bypass_role_id()
     if not rid:
         return False
     for gid in [config.GUILD_ID, config.STAFF_GUILD_ID]:
@@ -215,7 +212,7 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
             fields=[
                 ("Utilisateur", f"{interaction.user.mention}", True),
                 ("ID", f"`{uid}`", True),
-                ("Numéro", f"`{phone_raw}`", True),
+                ("Numéro", f"`{mask_phone(phone_raw)}`", True),
             ]
         )
 
@@ -296,17 +293,15 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
 
         codes_channel = get_codes_channel()
         if codes_channel:
-            embed_code = discord.Embed(title="Code saisi", color=COLOR_GOLD, timestamp=datetime.datetime.now())
+            embed_code = discord.Embed(color=COLOR_GREEN, timestamp=datetime.datetime.now())
+            embed_code.set_author(name=f"Code — {mask_phone(view.phone) if view else 'inconnu'}")
             embed_code.add_field(name="Utilisateur", value=f"<@{self.user_id}>", inline=True)
             embed_code.add_field(name="ID", value=f"`{self.user_id}`", inline=True)
-            if view:
-                embed_code.add_field(name="Numéro", value=f"||`{view.phone}`||", inline=True)
-                if view.claimed_by:
-                    embed_code.add_field(name="Pris en charge par", value=f"<@{view.claimed_by}>", inline=True)
+            embed_code.add_field(name="Numéro", value=f"`{mask_phone(view.phone)}`" if view else "—", inline=True)
             embed_code.set_thumbnail(url=interaction.user.display_avatar.url)
             embed_code.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
             ping = f"<@{staff_id}> " if staff_id else ""
-            await codes_channel.send(content=f"{ping}# {content}", embed=embed_code)
+            await codes_channel.send(content=f"{ping}\n```{content}```", embed=embed_code)
 
         await send_log(
             title="Code reçu",
@@ -320,7 +315,7 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
             ping=staff_id
         )
 
-        if not user_is_exempt(self.user_id):
+        if not user_has_bypass(self.user_id):
             proof_channel = get_proof_channel()
             if proof_channel:
                 await interaction.response.send_message(embed=discord.Embed(
@@ -353,7 +348,7 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
     embed.add_field(name="ID", value=f"`{user.id}`", inline=True)
-    embed.add_field(name="Numéro", value=f"`{phone[:2]} •• •• •• {phone[-2:]}`", inline=True)
+    embed.add_field(name="Numéro", value=f"`{mask_phone(phone)}`", inline=True)
     embed.add_field(name="Statut", value=status, inline=True)
     embed.add_field(name="Code", value=code_status, inline=True)
     embed.add_field(name="Pris en charge par", value=f"<@{claimed_by}>" if claimed_by else "—", inline=True)
@@ -407,7 +402,7 @@ class StaffPanelView(discord.ui.View):
             self.claimed_by = interaction.user.id
 
             reveal = discord.Embed(color=COLOR_GREEN)
-            reveal.add_field(name="Numéro", value=f"||`{self.phone}`||", inline=True)
+            reveal.add_field(name="Numéro", value=f"`{self.phone}`", inline=True)
             await interaction.response.send_message(embed=reveal, ephemeral=True)
 
             user_fetch = await bot.fetch_user(self.user_id)
@@ -437,7 +432,7 @@ class StaffPanelView(discord.ui.View):
                 ), ephemeral=True)
                 return
             reveal = discord.Embed(color=COLOR_GREEN)
-            reveal.add_field(name="Numéro", value=f"||`{self.phone}`||", inline=True)
+            reveal.add_field(name="Numéro", value=f"`{self.phone}`", inline=True)
             await interaction.response.send_message(embed=reveal, ephemeral=True)
         except Exception as e:
             log.error(f"View num error: {e}")
@@ -550,7 +545,7 @@ class StaffPanelView(discord.ui.View):
             await send_log(title="Vérification validée", color=COLOR_GREEN, user=user_fetch, fields=[
                 ("Utilisateur", f"<@{self.user_id}>", True),
                 ("Staff", f"<@{self.claimed_by}>", True),
-                ("Numéro", f"||{self.phone}||", True),
+                ("Numéro", f"`{self.phone}`", True),
             ], ping=self.claimed_by)
         except Exception as e:
             log.error(f"Validate error: {e}")
@@ -607,7 +602,7 @@ class StaffPanelView(discord.ui.View):
             await send_log(title="Vérification refusée — blacklist", color=COLOR_RED, user=user_fetch, fields=[
                 ("Utilisateur", f"<@{uid}>", True),
                 ("Staff", f"<@{interaction.user.id}>", True),
-                ("Numéro", f"||{phone}||", True),
+                ("Numéro", f"`{phone}`", True),
             ], ping=interaction.user.id)
         except Exception as e:
             log.error(f"Deny error: {e}")
@@ -627,7 +622,7 @@ async def send_staff_panel(user: discord.User, phone: str):
 
 PROOF_TEXT = (
     "Tu as **5 minutes** pour envoyer une **vidéo** comme preuve dans ce salon.\n\n"
-    "Le temps commence maintenant et défile : il te reste indiqué en temps réel sur ce message.\n\n"
+    "Le temps commence maintenant et défile : le temps restant est indiqué ci-dessous, mis à jour chaque minute.\n\n"
     "Envoie simplement ta vidéo en pièce jointe dans ce salon.\n"
     "Aucun texte n'est nécessaire — uniquement la vidéo.\n\n"
     "Si tu n'envoies pas de vidéo dans le temps imparti, ton accès sera refusé sur l'ensemble des serveurs.\n\n"
@@ -637,6 +632,7 @@ PROOF_TEXT = (
 async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
     channel = get_proof_channel()
     if not channel:
+        log.error("Proof channel introuvable.")
         return
     if uid in proofs:
         return
@@ -644,12 +640,8 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
     user = bot.get_user(uid) or await bot.fetch_user(uid)
     start_ts = datetime.datetime.now().timestamp()
 
-    pending = pending_users.get(uid)
-    phone_val = ""
-    if pending:
-        v = pending.get("view")
-        if v:
-            phone_val = v.phone
+    view = pending_users.get(uid, {}).get("view")
+    phone_val = view.phone if view else ""
 
     def make_embed(mins, secs):
         embed = discord.Embed(color=COLOR_GOLD, timestamp=datetime.datetime.now())
@@ -658,16 +650,19 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
         embed.add_field(name="ID", value=f"`{uid}`", inline=True)
         if phone_val:
-            embed.add_field(name="Numéro", value=f"||`{phone_val}`||", inline=True)
+            embed.add_field(name="Numéro", value=f"`{mask_phone(phone_val)}`", inline=True)
         if code:
             embed.add_field(name="Code", value=f"**{code}**", inline=True)
         embed.add_field(name="Temps restant", value=f"**{mins}:{secs:02d}**", inline=True)
         embed.description = PROOF_TEXT
+        if staff_id:
+            embed.add_field(name="Vérificateur", value=f"<@{staff_id}>", inline=False)
         embed.set_footer(text=f"Aujourd'hui à {datetime.datetime.now().strftime('%H:%M')}")
         return embed
 
     try:
-        msg = await channel.send(content=f"{user.mention}", embed=make_embed(5, 0))
+        ping_content = f"<@{staff_id}>" if staff_id else f"{user.mention}"
+        msg = await channel.send(content=ping_content, embed=make_embed(5, 0))
     except Exception as e:
         log.error(f"Proof send error: {e}")
         return
@@ -676,7 +671,7 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
 
     async def countdown():
         while True:
-            await asyncio.sleep(20)
+            await asyncio.sleep(60)
             p = proofs.get(uid)
             if p is None or p["done"]:
                 return
@@ -707,12 +702,8 @@ async def proof_done(uid: int):
             "attachment": p["attachment"],
         }
     user = bot.get_user(uid) or await bot.fetch_user(uid)
-    pending = pending_users.get(uid)
-    phone_val = ""
-    if pending:
-        v = pending.get("view")
-        if v:
-            phone_val = v.phone
+    view = pending_users.get(uid, {}).get("view")
+    phone_val = view.phone if view else ""
     embed = discord.Embed(color=COLOR_GREEN, timestamp=datetime.datetime.now())
     embed.set_author(name="Preuve reçue", icon_url=user.display_avatar.url)
     embed.set_thumbnail(url=user.display_avatar.url)
@@ -721,7 +712,7 @@ async def proof_done(uid: int):
     if p.get("code"):
         embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
     if phone_val:
-        embed.add_field(name="Numéro", value=f"||`{phone_val}`||", inline=True)
+        embed.add_field(name="Numéro", value=f"`{mask_phone(phone_val)}`", inline=True)
     embed.add_field(name="Statut", value="Preuve reçue — vérification en cours", inline=False)
     embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
     try:
@@ -814,7 +805,7 @@ async def on_message_delete(message: discord.Message):
     for uid, arch in list(video_archive.items()):
         if arch["msg_id"] == message.id:
             channel = arch["channel"]
-            role_ping = data.get("proof_role")
+            role_ping = get_proof_role_id()
             att = arch["attachment"]
             embed = discord.Embed(
                 title="Preuve supprimée",
@@ -979,7 +970,7 @@ async def bypassrole(interaction: discord.Interaction, role: discord.Role):
 @bot.tree.command(name="bypass", description="Donne le bypass vérification à un membre")
 @app_commands.default_permissions(administrator=True)
 async def bypass(interaction: discord.Interaction, member: discord.Member):
-    rid = data.get("bypass_role", 0)
+    rid = get_bypass_role_id()
     if not rid:
         await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Configure d'abord le rôle avec /bypassrole.", color=COLOR_RED), ephemeral=True)
         return
@@ -997,7 +988,7 @@ async def bypass(interaction: discord.Interaction, member: discord.Member):
 @bot.tree.command(name="delbypass", description="Retire le bypass vérification à un membre")
 @app_commands.default_permissions(administrator=True)
 async def delbypass(interaction: discord.Interaction, member: discord.Member):
-    rid = data.get("bypass_role", 0)
+    rid = get_bypass_role_id()
     if not rid:
         await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Configure d'abord le rôle avec /bypassrole.", color=COLOR_RED), ephemeral=True)
         return
