@@ -707,6 +707,12 @@ async def proof_done(uid: int):
             "attachment": p["attachment"],
         }
     user = bot.get_user(uid) or await bot.fetch_user(uid)
+    pending = pending_users.get(uid)
+    phone_val = ""
+    if pending:
+        v = pending.get("view")
+        if v:
+            phone_val = v.phone
     embed = discord.Embed(color=COLOR_GREEN, timestamp=datetime.datetime.now())
     embed.set_author(name="Preuve reçue", icon_url=user.display_avatar.url)
     embed.set_thumbnail(url=user.display_avatar.url)
@@ -714,7 +720,7 @@ async def proof_done(uid: int):
     embed.add_field(name="ID", value=f"`{uid}`", inline=True)
     if p.get("code"):
         embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
-    if phone_val := next((v.phone for v in [pending_users.get(uid, {}).get("view")] if v), ""):
+    if phone_val:
         embed.add_field(name="Numéro", value=f"||`{phone_val}`||", inline=True)
     embed.add_field(name="Statut", value="Preuve reçue — vérification en cours", inline=False)
     embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
@@ -739,14 +745,6 @@ async def proof_timeout(uid: int):
     blacklisted_users.add(uid)
     data["blacklisted_users"] = list(blacklisted_users)
     save_data()
-    try:
-        await user.send(embed=discord.Embed(
-            title="Vérification refusée",
-            description="Vous n'avez pas envoyé la preuve demandée dans le temps imparti.\n\n❌ Vous êtes banni de tous les serveurs.",
-            color=COLOR_RED
-        ))
-    except Exception:
-        pass
     for gid in [config.GUILD_ID, config.STAFF_GUILD_ID]:
         g = bot.get_guild(gid)
         if g:
@@ -877,7 +875,7 @@ class VerifyView(discord.ui.View):
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification")
 @app_commands.default_permissions(administrator=True)
 async def setupnsfw(interaction: discord.Interaction):
-    embed = discord.Embed(color=COLOR_RED)
+    embed = discord.Embed(color=COLOR_ORANGE)
     embed.set_author(name="VÉRIFICATION 18+ OBLIGATOIRE")
     embed.description = (
         "**RÈGLEMENT OFFICIEL DU SERVEUR — SERVEUR STRICTEMENT RÉSERVÉ AUX ADULTES (18+)**\n\n"
@@ -919,6 +917,16 @@ async def setupnsfw(interaction: discord.Interaction):
         "Cliquez sur **\"Vérifier\"** ci-dessous, entrez votre numéro de téléphone, et suivez les instructions pour recevoir votre code de vérification à 4 chiffres."
     )
     await interaction.response.send_message(embed=embed, view=VerifyView())
+
+@bot.tree.command(name="clear", description="Supprime des messages dans le salon")
+@app_commands.default_permissions(manage_messages=True)
+async def clear(interaction: discord.Interaction, nombre: int = 10):
+    if nombre < 1 or nombre > 100:
+        await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Choisis un nombre entre 1 et 100.", color=COLOR_RED), ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=nombre)
+    await interaction.followup.send(embed=discord.Embed(title="Messages supprimés", description=f"{len(deleted)} messages ont été supprimés.", color=COLOR_GREEN), ephemeral=True)
 
 @bot.tree.command(name="sync", description="Sync les commandes")
 @app_commands.default_permissions(administrator=True)
