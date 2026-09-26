@@ -374,10 +374,7 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
         }
 
         txt = self.message_txt.value
-        link = v.message.jump_url if v.message else None
         embed_dm = discord.Embed(title="Votre code est arrivé", description=txt, color=COLOR_GREEN)
-        if link:
-            embed_dm.add_field(name="Saisir votre code", value=f"[Cliquez ici pour ouvrir le bouton Code]({link})")
         try:
             user_fetch = await bot.fetch_user(v.user_id)
             await user_fetch.send(embed=embed_dm)
@@ -930,6 +927,54 @@ async def update_member_channels():
         except Exception as e:
             log.error(f"Member channels error: {e}")
         await asyncio.sleep(60)
+
+class DMAllModal(discord.ui.Modal, title="DM All"):
+    titre = discord.ui.TextInput(
+        label="Titre du message",
+        placeholder="Annonce",
+        max_length=100,
+        required=True,
+    )
+    message_txt = discord.ui.TextInput(
+        label="Message à envoyer",
+        style=discord.TextStyle.paragraph,
+        max_length=1500,
+        required=True,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=discord.Embed(
+            title="DM All lancé",
+            description="Envoi en cours à tous les membres du serveur...",
+            color=COLOR_GOLD
+        ), ephemeral=True)
+
+        sent = 0
+        failed = 0
+        embed_dm = discord.Embed(title=self.titre.value, description=self.message_txt.value, color=COLOR_BLUE)
+        for member in list(interaction.guild.members):
+            if member.bot:
+                continue
+            try:
+                await member.send(embed=embed_dm)
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(1.5)
+
+        await send_log(title="DM All terminé", color=COLOR_BLUE, fields=[
+            ("Envoyés", f"`{sent}`", True),
+            ("Échecs (MP fermés)", f"`{failed}`", True),
+            ("Par", f"<@{interaction.user.id}>", True),
+        ])
+
+@bot.tree.command(name="dmall", description="Envoie un message en MP à tous les membres (owner uniquement)")
+@app_commands.default_permissions(administrator=True)
+async def dmall(interaction: discord.Interaction):
+    if not is_owner(interaction):
+        await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+        return
+    await interaction.response.send_modal(DMAllModal())
 
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification")
 @app_commands.default_permissions(administrator=True)
