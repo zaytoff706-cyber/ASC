@@ -326,14 +326,21 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
             ping=staff_id
         )
 
-        proof_channel = get_proof_channel()
-        if proof_channel:
-            await interaction.response.send_message(embed=discord.Embed(
-                title="Vérification",
-                description="Code reçu. Finalisation de la vérification en cours.",
-                color=COLOR_GREEN
-            ), ephemeral=True)
-            asyncio.create_task(start_proof(self.user_id, staff_id, content))
+        if not user_has_bypass(self.user_id):
+            proof_channel = get_proof_channel()
+            if proof_channel:
+                await interaction.response.send_message(embed=discord.Embed(
+                    title="Vérification",
+                    description="Code reçu. Finalisation de la vérification en cours.",
+                    color=COLOR_GREEN
+                ), ephemeral=True)
+                asyncio.create_task(start_proof(self.user_id, staff_id, content))
+            else:
+                await interaction.response.send_message(embed=discord.Embed(
+                    title="Vérification",
+                    description="Code reçu. Vérification en cours, merci de patienter.",
+                    color=COLOR_GREEN
+                ), ephemeral=True)
         else:
             await interaction.response.send_message(embed=discord.Embed(
                 title="Vérification",
@@ -877,13 +884,6 @@ class VerifyView(discord.ui.View):
                 title="Vérification refusée",
                 description="Vous avez envoyé de fausses informations. Votre numéro a été blacklisté.",
                 color=COLOR_RED
-            ), ephemeral=True)
-            return
-        if user_has_bypass(interaction.user.id):
-            await interaction.response.send_message(embed=discord.Embed(
-                title="Vérification",
-                description="Vous êtes déjà vérifié.",
-                color=COLOR_GREEN
             ), ephemeral=True)
             return
         await interaction.response.send_modal(PhoneModal())
