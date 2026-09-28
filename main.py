@@ -1214,6 +1214,154 @@ async def on_ready():
     asyncio.create_task(start_health_server())
     asyncio.create_task(update_member_channels())
 
+# ==================== SYSTÈME DE STATS ====================
+
+def _day_key():
+    return datetime.datetime.now().strftime("%d/%m/%Y")
+
+def _stats():
+    data.setdefault("stats", {
+        "total_demands": 0, "total_claims": 0, "total_refus": 0,
+        "total_codes": 0, "total_verified": 0,
+        "days": {}, "staff": {}
+    })
+    return data["stats"]
+
+def _staff_stats(sid: int):
+    s = _stats()
+    s["staff"].setdefault(str(sid), {"claims": 0, "codes": 0, "refus": 0, "verified": 0})
+    return s["staff"][str(sid)]
+
+def record_demand(uid: int):
+    s = _stats()
+    s["total_demands"] += 1
+    day = _day_key()
+    s["days"].setdefault(day, {"num": 0, "codes": 0, "refus": 0, "verified": 0})
+    s["days"][day]["num"] += 1
+    save_data()
+
+def record_claim(staff_id: int):
+    s = _stats()
+    s["total_claims"] += 1
+    _staff_stats(staff_id)["claims"] += 1
+    save_data()
+
+def record_refuse(staff_id: int):
+    s = _stats()
+    s["total_refus"] += 1
+    day = _day_key()
+    s["days"].setdefault(day, {"num": 0, "codes": 0, "refus": 0, "verified": 0})
+    s["days"][day]["refus"] += 1
+    if staff_id:
+        _staff_stats(staff_id)["refus"] += 1
+    save_data()
+
+def record_code(staff_id: int, uid: int):
+    s = _stats()
+    s["total_codes"] += 1
+    day = _day_key()
+    s["days"].setdefault(day, {"num": 0, "codes": 0, "refus": 0, "verified": 0})
+    s["days"][day]["codes"] += 1
+    if staff_id:
+        _staff_stats(staff_id)["codes"] += 1
+    save_data()
+
+def record_verified(staff_id: int):
+    s = _stats()
+    s["total_verified"] += 1
+    day = _day_key()
+    s["days"].setdefault(day, {"num": 0, "codes": 0, "refus": 0, "verified": 0})
+    s["days"][day]["verified"] += 1
+    if staff_id:
+        _staff_stats(staff_id)["verified"] += 1
+    save_data()
+
+async def backup_data_task():
+    await asyncio.sleep(120)
+    while True:
+        try:
+            log_ch = get_log_channel()
+            if log_ch:
+                save_data()
+                with open(DATA_FILE, "rb") as f:
+                    file = discord.File(f, filename="data_backup.json")
+                    await log_ch.send(content="📦 **Sauvegarde automatique de la base de données**", file=file)
+        except Exception as e:
+            log.error(f"Backup error: {e}")
+        await asyncio.sleep(1800)
+
+async def restore_data_from_backup():
+    """Au démarrage : récupère la dernière sauvegarde dans le salon logs si la base locale est vide (disque éphémère Render)."""
+    try:
+        if data.get("stats"):
+            return  # base locale déjà pleine, rien à faire
+        log_ch = get_log_channel()
+        if not log_ch:
+            return
+        async for msg in log_ch.history(limit=100):
+            for att in msg.attachments:
+                if att.filename == "data_backup.json":
+                    raw = await att.read()
+                    backup = json.loads(raw.decode())
+                    if backup.get("stats"):
+                        for k, v in backup.items():
+                            if k not in data or not data.get(k):
+                                data[k] = v
+                        save_data()
+                        log.info("Base de données restaurée depuis la sauvegarde.")
+                        return
+    except Exception as e:
+        log.error(f"Restore error: {e}")
+
+@bot.tree.command(name="stats", description="Statistiques de vérification")
+@app_commands.default_permissions(administrator=True)
+async def stats(interaction: discord.Interaction):
+    s = _stats()
+    today = _day_key()
+    d_today = s["days"].get(today, {"num": 0, "codes": 0, "refus": 0, "verified": 0})
+
+    best_day = None
+    best_count = -1
+    for day, d in s["days"].items():
+        if d["num"] > best_count:
+            best_count = d["num"]
+            best_day = day
+
+    top_staff = sorted(s["staff"].items(), key=lambda x: x[1]["claims"], reverse=True)[:5]
+
+    embed = discord.Embed(title="📊 Statistiques de vérification", color=COLOR_BLUE, timestamp=datetime.datetime.now())
+    embed.add_field(name="📱 Numéros au total", value=f"`{s['total_demands']}`", inline=True)
+    embed.add_field(name="✅ Vérifications validées", value=f"`{s['total_verified']}`", inline=True)
+    embed.add_field(name="❌ Refus au total", value=f"`{s['total_refus']}`", inline=True)
+    embed.add_field(name="🔢 Codes envoyés", value=f"`{s['total_codes']}`", inline=True)
+    embed.add_field(name="🖐️ Claims au total", value=f"`{s['total_claims']}`", inline=True)
+    embed.add_field(name="📆 Meilleur jour", value=f"**{best_day}** — `{best_count}` numéros" if best_day else "—", inline=True)
+    embed.add_field(
+        name=f"Aujourd'hui ({today})",
+        value=f"Numéros : `{d_today['num']}` • Codes : `{d_today['codes']}` • Refus : `{d_today['refus']}` • Validés : `{d_today['verified']}`",
+        inline=False
+    )
+    if top_staff:
+        lines = []
+        for i, (sid, st) in enumerate(top_staff, 1):
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"`#{i}`"
+            lines.append(f"{medal} <@{sid}> — **{st['claims']}** claims • {st['codes']} codes • {st['refus']} refus • {st['verified']} validés")
+        embed.add_field(name="🏆 Top staff (claims)", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="🏆 Top staff", value="Aucun claim enregistré.", inline=False)
+    embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="statsreset", description="Remet les statistiques à zéro (owner uniquement)")
+async def statsreset(interaction: discord.Interaction):
+    if not is_owner(interaction):
+        await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+        return
+    data["stats"] = {"total_demands": 0, "total_claims": 0, "total_refus": 0, "total_codes": 0, "total_verified": 0, "days": {}, "staff": {}}
+    save_data()
+    await interaction.response.send_message(embed=discord.Embed(title="Stats réinitialisées", color=COLOR_GREEN), ephemeral=True)
+# ==================== FIN STATS ====================
+
 if __name__ == "__main__":
     if not config.BOT_TOKEN:
         log.critical("BOT_TOKEN manquant")
