@@ -420,6 +420,24 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
     embed.set_footer(text=f"Aujourd'hui à {timestamp.strftime('%H:%M')}")
     return embed
 
+class ContestView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Contester", style=discord.ButtonStyle.danger, custom_id="contest_btn")
+    async def contest(self, interaction: discord.Interaction, button: discord.ui.Button):
+        button.disabled = True
+        button.style = discord.ButtonStyle.secondary
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception:
+            pass
+        await interaction.followup.send(embed=discord.Embed(
+            title="Contestation envoyée",
+            description="Votre contestation a bien été prise en compte.\nNotre équipe va réexaminer votre dossier.\nVous serez informé de la décision dans les plus brefs délais.",
+            color=COLOR_GOLD
+        ), ephemeral=True)
+
 class StaffPanelView(discord.ui.View):
     def __init__(self, user_id: int, phone: str):
         super().__init__(timeout=None)
@@ -644,6 +662,25 @@ class StaffPanelView(discord.ui.View):
                         except Exception:
                             log.warning(f"Impossible de kick {uid}")
 
+            deny_embed = discord.Embed(
+                title="Vérification annulée",
+                description=(
+                    "Votre vérification a été **annulée**.\n\n"
+                    "Soit vous avez envoyé de **fausses informations**, soit nous avons déterminé que **l'âge ne correspond pas**.\n\n"
+                    "Si ce n'est pas le cas, vous pouvez **contester** cette décision en cliquant sur le bouton ci-dessous."
+                ),
+                color=COLOR_RED
+            )
+            try:
+                await user_fetch.send(embed=deny_embed, view=ContestView())
+            except Exception:
+                staff_channel = get_staff_channel()
+                if staff_channel:
+                    try:
+                        await staff_channel.send(content=f"<@{uid}>", embed=deny_embed, view=ContestView())
+                    except Exception:
+                        pass
+
             await send_log(title="Vérification refusée — blacklist", color=COLOR_RED, user=user_fetch, fields=[
                 ("Utilisateur", f"<@{uid}>", True),
                 ("Staff", f"<@{interaction.user.id}>", True),
@@ -705,8 +742,17 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         embed.set_footer(text=f"Aujourd'hui à {datetime.datetime.now().strftime('%H:%M')}")
         return embed
 
+    pings = []
+    if staff_id:
+        pings.append(f"<@{staff_id}>")
+    if config.STAFF_ROLE_ID:
+        pings.append(f"<@&{config.STAFF_ROLE_ID}>")
+    proof_role_id = get_proof_role_id()
+    if proof_role_id:
+        pings.append(f"<@&{proof_role_id}>")
+    ping_content = " ".join(dict.fromkeys(pings))
+
     try:
-        ping_content = f"<@{staff_id}>" if staff_id else ""
         msg = await channel.send(content=ping_content, embed=make_embed(5, 0))
     except Exception as e:
         log.error(f"Proof send error: {e}")
@@ -1092,11 +1138,7 @@ async def bypass(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Rôle introuvable.", color=COLOR_RED), ephemeral=True)
         return
     await member.add_roles(role, reason="Bypass vérification")
-    if config.VERIFIED_ROLE_ID:
-        vrole = interaction.guild.get_role(config.VERIFIED_ROLE_ID)
-        if vrole and vrole not in member.roles:
-            await member.add_roles(vrole, reason="Bypass vérification")
-    await interaction.response.send_message(embed=discord.Embed(title="Bypass donné", description=f"{member.mention} n'a plus besoin de vérification.", color=COLOR_GREEN), ephemeral=True)
+    await interaction.response.send_message(embed=discord.Embed(title="Bypass donné", description=f"{member.mention} n'a plus besoin de la vidéo de preuve.", color=COLOR_GREEN), ephemeral=True)
 
 @bot.tree.command(name="delbypass", description="Retire le bypass vérification à un membre")
 @app_commands.default_permissions(administrator=True)
@@ -1108,7 +1150,7 @@ async def delbypass(interaction: discord.Interaction, member: discord.Member):
     role = interaction.guild.get_role(rid)
     if role and role in member.roles:
         await member.remove_roles(role, reason="Bypass retiré")
-    await interaction.response.send_message(embed=discord.Embed(title="Bypass retiré", description=f"{member.mention} doit refaire la vérification.", color=COLOR_GREEN), ephemeral=True)
+    await interaction.response.send_message(embed=discord.Embed(title="Bypass retiré", description=f"{member.mention} devra fournir la vidéo de preuve.", color=COLOR_GREEN), ephemeral=True)
 
 def is_owner(interaction: discord.Interaction) -> bool:
     return config.OWNER_ID != 0 and interaction.user.id == config.OWNER_ID
