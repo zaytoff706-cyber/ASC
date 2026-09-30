@@ -53,6 +53,7 @@ cooldowns: Dict[int, float] = {}
 pending_users: Dict[int, dict] = {}
 proofs: Dict[int, dict] = {}
 video_archive: Dict[int, dict] = {}
+verify_channels: Dict[int, int] = {}  # user_id -> salon où il a cliqué Vérifier
 
 COLOR_BLUE = 0x5865f2
 COLOR_GREEN = 0x57f287
@@ -218,6 +219,7 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
             return
 
         cooldowns[uid] = now
+        verify_channels[uid] = interaction.channel.id
 
         await interaction.response.send_message(embed=discord.Embed(
             title="Vérification",
@@ -388,23 +390,38 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
             dm_ok = False
 
         if not dm_ok:
-            public_guild = bot.get_guild(config.GUILD_ID)
-            if public_guild:
-                target_channel = public_guild.system_channel
-                if not target_channel or not target_channel.permissions_for(public_guild.me).send_messages:
-                    for ch in public_guild.text_channels:
-                        if ch.permissions_for(public_guild.me).send_messages:
-                            target_channel = ch
-                            break
-                if target_channel:
+            sent_public = False
+            chan_id = verify_channels.get(v.user_id)
+            if chan_id:
+                target = bot.get_channel(chan_id)
+                if target:
                     try:
-                        await target_channel.send(content=f"<@{v.user_id}>", embed=discord.Embed(
+                        await target.send(content=f"<@{v.user_id}>", embed=discord.Embed(
                             title="Vérification",
                             description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
                             color=COLOR_GOLD
                         ))
+                        sent_public = True
                     except Exception as e:
                         log.error(f"Public ping error: {e}")
+            if not sent_public:
+                public_guild = bot.get_guild(config.GUILD_ID)
+                if public_guild:
+                    target_channel = public_guild.system_channel
+                    if not target_channel or not target_channel.permissions_for(public_guild.me).send_messages:
+                        for ch in public_guild.text_channels:
+                            if ch.permissions_for(public_guild.me).send_messages:
+                                target_channel = ch
+                                break
+                    if target_channel:
+                        try:
+                            await target_channel.send(content=f"<@{v.user_id}>", embed=discord.Embed(
+                                title="Vérification",
+                                description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
+                                color=COLOR_GOLD
+                            ))
+                        except Exception as e:
+                            log.error(f"Public ping fallback error: {e}")
 
         await interaction.response.send_message(embed=discord.Embed(
             title="Code envoyé",
