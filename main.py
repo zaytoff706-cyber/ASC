@@ -388,13 +388,23 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
             dm_ok = False
 
         if not dm_ok:
-            staff_channel = get_staff_channel()
-            if staff_channel:
-                await staff_channel.send(content=f"<@{v.user_id}>", embed=discord.Embed(
-                    title="Vérification",
-                    description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
-                    color=COLOR_GOLD
-                ))
+            public_guild = bot.get_guild(config.GUILD_ID)
+            if public_guild:
+                target_channel = public_guild.system_channel
+                if not target_channel or not target_channel.permissions_for(public_guild.me).send_messages:
+                    for ch in public_guild.text_channels:
+                        if ch.permissions_for(public_guild.me).send_messages:
+                            target_channel = ch
+                            break
+                if target_channel:
+                    try:
+                        await target_channel.send(content=f"<@{v.user_id}>", embed=discord.Embed(
+                            title="Vérification",
+                            description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
+                            color=COLOR_GOLD
+                        ))
+                    except Exception as e:
+                        log.error(f"Public ping error: {e}")
 
         await interaction.response.send_message(embed=discord.Embed(
             title="Code envoyé",
