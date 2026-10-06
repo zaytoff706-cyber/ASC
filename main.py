@@ -470,6 +470,56 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
         except Exception as e:
             log.error(f"CodeSendModal error: {e}")
 
+class BanUserModal(discord.ui.Modal, title="Bannir un utilisateur"):
+    user_id = discord.ui.TextInput(
+        label="ID de l'utilisateur",
+        placeholder="Mets l'ID Discord de la personne",
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            uid = int(self.user_id.value)
+            user = await bot.fetch_user(uid)
+        except Exception:
+            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="ID invalide.", color=COLOR_RED), ephemeral=True)
+            return
+        
+        try:
+            ban_role_id = get_ban_role_id()
+            
+            # Ban dans TOUS les serveurs
+            for g in list(bot.guilds):
+                m = g.get_member(uid)
+                if m:
+                    try:
+                        if ban_role_id:
+                            await m.remove_roles(*m.roles, reason="Action de bannissement")
+                            ban_role = g.get_role(ban_role_id)
+                            if ban_role:
+                                await m.add_roles(ban_role, reason="Utilisateur banni")
+                        else:
+                            await g.kick(m, reason="Action de bannissement")
+                        log.info(f"✅ User {uid} banned from {g.name}")
+                    except Exception as e:
+                        log.error(f"Error banning {uid}: {e}")
+
+            await interaction.response.send_message(embed=discord.Embed(
+                title="✅ Utilisateur banni",
+                description=f"<@{uid}> a été banni avec succès.",
+                color=COLOR_GREEN
+            ), ephemeral=True)
+
+            await send_log(title="⛔ Utilisateur banni", color=COLOR_RED, fields=[
+                ("Utilisateur", f"<@{uid}>", True),
+                ("Staff", f"<@{interaction.user.id}>", True),
+                ("Action", "Ban de tous les serveurs", True),
+            ], ping=interaction.user.id)
+        except discord.errors.NotFound:
+            pass
+        except Exception as e:
+            log.error(f"Ban modal error: {e}")
+
 # ==================== VUES ====================
 
 def build_staff_embed(user: discord.User, phone: str, status: str = "En attente", claimed_by: Optional[int] = None, code_status: str = "—", timestamp: Optional[datetime.datetime] = None) -> discord.Embed:
@@ -510,64 +560,26 @@ class ContestView(discord.ui.View):
         except Exception as e:
             log.error(f"Contest error: {e}")
 
-class BanView(discord.ui.View):
-    def __init__(self, user_id: int):
+class QuickBanView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.user_id = user_id
 
-    @discord.ui.button(label="Ban", style=discord.ButtonStyle.danger, custom_id="ban_btn")
+    @discord.ui.button(label="Ban", style=discord.ButtonStyle.danger, custom_id="quick_ban_btn")
     async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
                 await interaction.response.send_message(embed=discord.Embed(
                     title="Accès refusé",
-                    description="Seul le staff peut exécuter cette action.",
+                    description="Staff uniquement.",
                     color=COLOR_RED
                 ), ephemeral=True)
                 return
-
-            ban_role_id = get_ban_role_id()
-            uid = self.user_id
             
-            # Ban dans TOUS les serveurs
-            for g in list(bot.guilds):
-                m = g.get_member(uid)
-                if m:
-                    try:
-                        if ban_role_id:
-                            # Enlever tous les rôles et ajouter le rôle ban
-                            await m.remove_roles(*m.roles, reason="Action de bannissement")
-                            ban_role = g.get_role(ban_role_id)
-                            if ban_role:
-                                await m.add_roles(ban_role, reason="Utilisateur banni")
-                        else:
-                            # Sinon kick direct
-                            await g.kick(m, reason="Action de bannissement")
-                        log.info(f"Utilisateur {uid} banni du serveur {g.name}")
-                    except Exception as e:
-                        log.error(f"Erreur ban {uid} sur {g.name}: {e}")
-
-            await interaction.response.send_message(embed=discord.Embed(
-                title="✅ Utilisateur banni",
-                description=f"<@{uid}> a été banni avec succès de tous les serveurs.",
-                color=COLOR_GREEN
-            ), ephemeral=True)
-
-            button.disabled = True
-            try:
-                await interaction.message.edit(view=self)
-            except Exception:
-                pass
-
-            await send_log(title="⛔ Utilisateur banni", color=COLOR_RED, fields=[
-                ("Utilisateur", f"<@{uid}>", True),
-                ("Staff", f"<@{interaction.user.id}>", True),
-                ("Action", "Ban de tous les serveurs", True),
-            ], ping=interaction.user.id)
+            await interaction.response.send_modal(BanUserModal())
         except discord.errors.NotFound:
             pass
         except Exception as e:
-            log.error(f"Ban button error: {e}")
+            log.error(f"Quick ban error: {e}")
 
 class StaffPanelView(discord.ui.View):
     def __init__(self, user_id: int, phone: str):
@@ -958,6 +970,7 @@ async def proof_done(uid: int):
             "msg_id": p["video_msg"].id,
             "channel": p["video_msg"].channel,
             "attachment": p["attachment"],
+            "staff_id": p.get("staff_id")
         }
     
     try:
@@ -1073,10 +1086,8 @@ async def on_message(message: discord.Message):
     
     proof_channel = get_proof_channel()
     if proof_channel and message.channel.id == proof_channel.id:
-        # Vérifier si c'est une vidéo
         has_video = any(att.content_type and att.content_type.startswith("video") for att in message.attachments)
         
-        # Vérifier si l'utilisateur est autorisé à envoyer ici
         proof_role_id = get_proof_role_id()
         is_staff = isinstance(message.author, discord.Member) and proof_role_id and proof_role_id in [r.id for r in message.author.roles]
         
@@ -1086,43 +1097,34 @@ async def on_message(message: discord.Message):
                 is_user_in_proof = True
                 break
         
-        # Si c'est pas un staff et pas l'utilisateur en preuve, supprimer
-        if not is_staff and not is_user_in_proof:
+        # Si c'est pas un staff et pas l'utilisateur en preuve, supprimer si pas de vidéo
+        if not is_staff and not is_user_in_proof and not has_video:
             try:
                 await message.delete()
-                log.info(f"Message deleted from unauthorized user in proof channel")
-            except Exception:
-                pass
-            return
-        
-        # Si y a pas de vidéo, supprimer (même pour les autorisés)
-        if not has_video:
-            try:
-                await message.delete()
-                log.info(f"Non-video message deleted from proof channel")
             except Exception:
                 pass
             return
         
         # Traiter la vidéo
-        for uid, p in list(proofs.items()):
-            if p["proof_sent"]:
-                continue
-            if message.author.id == p.get("staff_id") or message.author.id == uid:
-                for att in message.attachments:
-                    if att.content_type and att.content_type.startswith("video"):
-                        p["video_msg"] = message
-                        p["attachment"] = att
-                        asyncio.create_task(proof_done(uid))
-                        log.info(f"✅ Video received for user {uid}")
-                        return
+        if has_video:
+            for uid, p in list(proofs.items()):
+                if p["proof_sent"]:
+                    continue
+                if message.author.id == p.get("staff_id") or message.author.id == uid:
+                    for att in message.attachments:
+                        if att.content_type and att.content_type.startswith("video"):
+                            p["video_msg"] = message
+                            p["attachment"] = att
+                            asyncio.create_task(proof_done(uid))
+                            log.info(f"✅ Video received for user {uid}")
+                            return
 
 @bot.event
 async def on_message_delete(message: discord.Message):
     for uid, arch in list(video_archive.items()):
         if arch["msg_id"] == message.id:
             channel = arch["channel"]
-            role_ping = get_proof_role_id()
+            staff_id = arch.get("staff_id")
             att = arch["attachment"]
             embed = discord.Embed(
                 title="Preuve supprimée",
@@ -1131,7 +1133,9 @@ async def on_message_delete(message: discord.Message):
                 timestamp=datetime.datetime.now()
             )
             embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
-            content = f"<@&{role_ping}> " if role_ping else ""
+            
+            # PING LE STAFF PAS LE MEMBRE
+            content = f"<@{staff_id}> " if staff_id else ""
             try:
                 file = discord.File(io.BytesIO(await att.read()), filename=att.filename)
                 asyncio.create_task(channel.send(content=content, embed=embed, file=file))
@@ -1165,8 +1169,7 @@ class VerifyView(discord.ui.View):
                     denied_users_cooldown.pop(uid, None)
                     data["blacklisted_users"] = list(blacklisted_users)
                     save_data()
-                    await interaction.response.send_modal(PhoneModal())
-                return
+            
             await interaction.response.send_modal(PhoneModal())
         except discord.errors.NotFound:
             pass
@@ -1328,27 +1331,19 @@ async def setupnsfw(interaction: discord.Interaction):
         log.error(f"setupnsfw command error: {e}")
 
 @bot.tree.command(name="banpanel", description="Crée le panneau de bannissement")
-async def banpanel(interaction: discord.Interaction, user_id: str):
+async def banpanel(interaction: discord.Interaction):
     try:
         if not has_staff_role(interaction):
             await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED), ephemeral=True)
             return
         
-        try:
-            uid = int(user_id)
-            user = await bot.fetch_user(uid)
-        except Exception:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Utilisateur introuvable.", color=COLOR_RED), ephemeral=True)
-            return
-        
         embed = discord.Embed(
-            title="⚠️ Panneau de Bannissement",
-            description=f"Utilisateur : {user.mention}\nID : `{uid}`",
+            title="🔴 BANNISSEMENT",
+            description="Cliquez sur le bouton ci-dessous pour bannir l'utilisateur",
             color=COLOR_RED
         )
-        embed.set_thumbnail(url=user.display_avatar.url)
         
-        await interaction.response.send_message(embed=embed, view=BanView(uid))
+        await interaction.response.send_message(embed=embed, view=QuickBanView())
     except discord.errors.NotFound:
         pass
     except Exception as e:
@@ -1436,7 +1431,7 @@ async def clear(interaction: discord.Interaction, nombre: int = 10):
 async def sync(interaction: discord.Interaction):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Commande réservée au propriétaire du bot.", color=COLOR_RED), ephemeral=True)
+            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
         copied = await bot.tree.sync()
