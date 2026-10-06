@@ -183,16 +183,15 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
                 secs = int(denied_remaining % 60)
                 await interaction.response.send_message(embed=discord.Embed(
                     title="Vérification refusée",
-                    description=f"Votre vérification a été refusée.\n\nVous pouvez réessayer dans **{mins}m {secs:02d}s**.\n\nSi vous pensez qu'il y a une erreur, rejoignez notre serveur d'appel.",
+                    description=f"Votre vérification a été refusée.\n\nVous pouvez réessayer dans **{mins}m {secs:02d}s**.",
                     color=COLOR_RED
                 ), ephemeral=True)
+                return
             else:
                 blacklisted_users.discard(uid)
                 denied_users_cooldown.pop(uid, None)
                 data["blacklisted_users"] = list(blacklisted_users)
                 save_data()
-                await interaction.response.send_modal(PhoneModal())
-            return
 
         phone_raw = self.phone.value.strip().replace(" ", "").replace("-", "")
 
@@ -750,7 +749,7 @@ PROOF_TEXT = (
     "Le temps se met à jour chaque minute sur ce message.\n\n"
     "Envoie simplement ta vidéo en pièce jointe dans ce salon.\n"
     "Aucun texte n'est nécessaire — uniquement la vidéo.\n\n"
-    "Si tu n'envoies pas de vidéo dans le temps imparti, tu sera banni de tous les serveurs.\n\n"
+    "Si tu n'envoies pas de vidéo dans le temps imparti, tu seras banni de tous les serveurs.\n\n"
     "Si ta vidéo est supprimée, elle sera automatiquement renvoyée ici et conservée."
 )
 
@@ -881,21 +880,23 @@ async def proof_timeout(uid: int):
                     pass
         
         # Message de preuve dans le salon proof
-        embed = discord.Embed(color=COLOR_RED, timestamp=datetime.datetime.now())
-        embed.set_author(name="Délai dépassé", icon_url=user.display_avatar.url)
-        embed.set_thumbnail(url=user.display_avatar.url)
-        embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
-        embed.add_field(name="ID", value=f"`{uid}`", inline=True)
-        if p.get("code"):
-            embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
-        if staff_id:
-            embed.add_field(name="Vérificateur", value=f"<@{staff_id}>", inline=False)
-        embed.add_field(name="Statut", value="Aucune preuve envoyée — Utilisateur banni", inline=False)
-        embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
-        try:
-            await p["message"].edit(embed=embed, view=None)
-        except Exception:
-            pass
+        proof_channel = get_proof_channel()
+        if proof_channel and p.get("message"):
+            embed = discord.Embed(color=COLOR_RED, timestamp=datetime.datetime.now())
+            embed.set_author(name="Délai dépassé", icon_url=user.display_avatar.url)
+            embed.set_thumbnail(url=user.display_avatar.url)
+            embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
+            embed.add_field(name="ID", value=f"`{uid}`", inline=True)
+            if p.get("code"):
+                embed.add_field(name="Code", value=f"**{p['code']}**", inline=True)
+            if staff_id:
+                embed.add_field(name="Vérificateur", value=f"<@{staff_id}>", inline=False)
+            embed.add_field(name="Statut", value="Aucune preuve envoyée — Utilisateur banni", inline=False)
+            embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
+            try:
+                await p["message"].edit(embed=embed, view=None)
+            except Exception:
+                pass
         
         # MP avec lien d'appel
         appeal_link = data.get("appeal_server_link", "https://discord.gg/example")
