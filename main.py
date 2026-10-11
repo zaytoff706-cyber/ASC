@@ -6,22 +6,190 @@ import datetime
 import io
 import json
 import logging
+import random
+import uuid
 from typing import Optional, Dict, Set
 from aiohttp import web
-import config
-from utils import (
-    validate_phone,
-    validate_code,
-    mask_phone,
-    load_blacklist,
-    save_blacklist,
-    is_user_blacklisted,
-    is_phone_blacklisted,
-    add_to_blacklist
-)
+from pymongo import MongoClient
+from urllib.parse import urlparse
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("VerifBot")
+
+# ==================== CONFIG ====================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GUILD_ID = int(os.getenv("GUILD_ID") or "0")
+STAFF_GUILD_ID = int(os.getenv("STAFF_GUILD_ID") or "0")
+STAFF_ROLE_ID = int(os.getenv("STAFF_ROLE_ID") or "0")
+OWNER_ID = int(os.getenv("OWNER_ID") or "0")
+
+STAFF_CHANNEL_ID = int(os.getenv("STAFF_CHANNEL_ID") or "0")
+LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID") or "0")
+PROOF_CHANNEL_ID = int(os.getenv("PROOF_CHANNEL_ID") or "0")
+CODES_CHANNEL_ID = int(os.getenv("CODES_CHANNEL_ID") or "0")
+PROOF_ROLE_ID = int(os.getenv("PROOF_ROLE_ID") or "0")
+BYPASS_ROLE_ID = int(os.getenv("BYPASS_ROLE_ID") or "0")
+VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID") or "0")
+BAN_ROLE_ID = int(os.getenv("BAN_ROLE_ID") or "0")
+
+TICKETS_CHANNEL_ID = int(os.getenv("TICKETS_CHANNEL_ID") or "0")
+TICKETS_LOG_CHANNEL_ID = int(os.getenv("TICKETS_LOG_CHANNEL_ID") or "0")
+
+GIVEAWAY_PROOF_CHANNEL_ID = int(os.getenv("GIVEAWAY_PROOF_CHANNEL_ID") or "0")
+
+MONGO_URI = os.getenv("MONGO_URI", "")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "discord_bot")
+
+COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS") or "900")
+APPEAL_SERVER_LINK = os.getenv("APPEAL_SERVER_LINK", "https://discord.gg/example")
+PORT = int(os.getenv("PORT") or "10000")
+
+# ==================== MONGO DB ====================
+
+mongo_client = None
+mongo_db = None
+
+def init_mongodb():
+    global mongo_client, mongo_db
+    if not MONGO_URI:
+        log.warning("MONGO_URI not set. Using JSON fallback.")
+        return False
+    try:
+        mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_db = mongo_client[MONGO_DB_NAME]
+        mongo_db.command("ping")
+        log.info("✅ MongoDB connected")
+        return True
+    except Exception as e:
+        log.error(f"MongoDB failed: {e}. Using JSON fallback.")
+        return False
+
+def load_blacklist_db():
+    if mongo_db:
+        doc = mongo_db["blacklist"].find_one({})
+        if doc:
+            return {"users": doc.get("users", []), "phones": doc.get("phones", [])}
+    if os.path.exists("blacklist.json"):
+        try:
+            with open("blacklist.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"users": [], "phones": []}
+
+def save_blacklist_db(bl):
+    if mongo_db:
+        mongo_db["blacklist"].delete_many({})
+        mongo_db["blacklist"].insert_one(bl)
+        return
+    with open("blacklist.json", "w", encoding="utf-8") as f:
+        json.dump(bl, f, indent=2)
+
+def load_data_db():
+    if mongo_db:
+        doc = mongo_db["bot_data"].find_one({})
+        if doc:
+            return doc
+    if os.path.exists("data.json"):
+        try:
+            with open("data.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_data_db(data):
+    if mongo_db:
+        mongo_db["bot_data"].delete_many({})
+        mongo_db["bot_data"].insert_one(data)
+        return
+    with open("data.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def save_ticket_db(ticket_data):
+    if mongo_db:
+        mongo_db["tickets"].insert_one(ticket_data)
+        return
+    tickets = []
+    if os.path.exists("tickets.json"):
+        try:
+            with open("tickets.json", "r", encoding="utf-8") as f:
+                tickets = json.load(f)
+        except Exception:
+            pass
+    tickets.append(ticket_data)
+    with open("tickets.json", "w", encoding="utf-8") as f:
+        json.dump(tickets, f, indent=2)
+
+def save_giveaway_db(giveaway_data):
+    if mongo_db:
+        mongo_db["giveaway"].delete_many({})
+        mongo_db["giveaway"].insert_one(giveaway_data)
+        return
+    with open("giveaway.json", "w", encoding="utf-8") as f:
+        json.dump(giveaway_data, f, indent=2)
+
+def get_giveaway_db():
+    if mongo_db:
+        doc = mongo_db["giveaway"].find_one({})
+        return doc if doc else {}
+    if os.path.exists("giveaway.json"):
+        try:
+            with open("giveaway.json", "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+# ==================== UTILS ====================
+
+import re
+
+PHONE_REGEX = re.compile(r"^(06|07)\d{8}$")
+
+def validate_phone(phone: str):
+    phone = phone.strip().replace(" ", "").replace("-", "")
+    if not PHONE_REGEX.match(phone):
+        return False, "Le numéro doit commencer par 06 ou 07 et contenir 10 chiffres."
+    suffix = phone[2:]
+    if len(set(suffix)) == 1:
+        return False, "Ce numéro est invalide (chiffres répétés)."
+    if suffix in ["12345678", "23456789", "34567890", "87654321", "98765432", "09876543"]:
+        return False, "Ce numéro est invalide (pattern séquentiel)."
+    if suffix[:2] == suffix[2:4] == suffix[4:6] == suffix[6:8]:
+        return False, "Ce numéro est invalide (pattern répété)."
+    return True, ""
+
+def validate_code(code: str):
+    code = code.strip()
+    if not code.isdigit() or len(code) != 4:
+        return False, "Veuillez écrire uniquement le code de vérification à 4 chiffres."
+    if len(set(code)) == 1:
+        return False, "Code invalide (chiffres répétés)."
+    if code in ["1234", "2345", "3456", "4567", "5678", "6789", "7890", "4321", "5432", "6543", "7654", "8765", "9876", "0987"]:
+        return False, "Code invalide (pattern séquentiel)."
+    return True, ""
+
+def mask_phone(phone: str) -> str:
+    return phone[:2] + "******" + phone[-2:]
+
+def mask_code(code: str) -> str:
+    if len(code) < 4:
+        return code
+    return f"{code[:2]}{'*' * (len(code) - 4)}{code[-2:]}"
+
+def is_valid_url(value: str | None) -> bool:
+    if not value:
+        return True
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+# ==================== BOT SETUP ====================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -31,21 +199,7 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 DATA_FILE = "data.json"
 
-def load_data() -> dict:
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def save_data():
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-    except Exception as e:
-        log.exception("Save error")
-
-data: dict = load_data()
+data = load_data_db()
 data.setdefault("blacklisted_numbers", [])
 data.setdefault("blacklisted_users", [])
 data.setdefault("staff_channel", 0)
@@ -54,12 +208,12 @@ data.setdefault("proof_channel", 0)
 data.setdefault("codes_channel", 0)
 data.setdefault("proof_role", 0)
 data.setdefault("bypass_role", 0)
-data.setdefault("appeal_server_link", "")
+data.setdefault("ban_role", 0)
+data.setdefault("appeal_server_link", APPEAL_SERVER_LINK)
 data.setdefault("total_verifications", 0)
 data.setdefault("total_codes_received", 0)
-data.setdefault("ban_role", 0)
 
-blacklist_data = load_blacklist()
+blacklist_data = load_blacklist_db()
 blacklisted_numbers: Set[str] = set(blacklist_data.get("phones", []))
 blacklisted_users: Set[int] = set(blacklist_data.get("users", []))
 
@@ -75,10 +229,20 @@ COLOR_GREEN = 0x57f287
 COLOR_RED = 0xed4245
 COLOR_GOLD = 0xfee75c
 COLOR_ORANGE = 0xe67e22
+COLOR_CHERRY = 0xD7124D
 
-CODE_WINDOW = 600
+CODE_WINDOW = 180
 PROOF_WINDOW = 300
 DENY_COOLDOWN = 1800
+
+COLOURS = {
+    "red": 0xED4245,
+    "yellow": 0xFEE75C,
+    "green": 0x57F287,
+    "blue": 0x5865F2,
+    "purple": 0x9B59B6,
+    "orange": 0xE67E22,
+}
 
 # ==================== HEALTH SERVER ====================
 
@@ -91,16 +255,11 @@ async def start_health_server():
     app.router.add_get("/health", health_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", config.PORT)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    log.info(f"Health check on port {config.PORT}")
+    log.info(f"Health check on port {PORT}")
 
 # ==================== HELPERS ====================
-
-def mask_code(code: str) -> str:
-    if len(code) < 4:
-        return code
-    return f"{code[:2]}{'*'*(len(code)-4)}{code[-2:]}"
 
 def get_channel(key: str, env_id: int):
     if data.get(key):
@@ -112,22 +271,22 @@ def get_channel(key: str, env_id: int):
     return None
 
 def get_staff_channel():
-    return get_channel("staff_channel", config.STAFF_CHANNEL_ID)
+    return get_channel("staff_channel", STAFF_CHANNEL_ID)
 
 def get_log_channel():
-    return get_channel("log_channel", config.LOG_CHANNEL_ID)
+    return get_channel("log_channel", LOG_CHANNEL_ID)
 
 def get_proof_channel():
-    return get_channel("proof_channel", config.PROOF_CHANNEL_ID)
+    return get_channel("proof_channel", PROOF_CHANNEL_ID)
 
 def get_codes_channel():
-    return get_channel("codes_channel", config.CODES_CHANNEL_ID)
+    return get_channel("codes_channel", CODES_CHANNEL_ID)
 
 def get_proof_role_id():
-    return data.get("proof_role") or config.PROOF_ROLE_ID
+    return data.get("proof_role") or PROOF_ROLE_ID
 
 def get_bypass_role_id():
-    return data.get("bypass_role") or config.BYPASS_ROLE_ID
+    return data.get("bypass_role") or BYPASS_ROLE_ID
 
 def get_ban_role_id():
     return data.get("ban_role") or 0
@@ -147,7 +306,7 @@ async def safe_edit_message(message: discord.Message, embed: discord.Embed, view
     except discord.errors.HTTPException as e:
         if e.status == 429:
             retry_after = getattr(e, "retry_after", 2.0)
-            log.warning(f"Rate limit on message edit. Retrying in {retry_after}s")
+            log.warning(f"Rate limit. Retrying in {retry_after}s")
             await asyncio.sleep(retry_after)
             try:
                 await message.edit(embed=embed, view=view)
@@ -182,19 +341,19 @@ async def send_log(title: str, description: str = "", color: int = COLOR_BLUE, f
 
 def has_staff_role(interaction: discord.Interaction) -> bool:
     if isinstance(interaction.user, discord.Member):
-        if config.STAFF_ROLE_ID == 0:
+        if STAFF_ROLE_ID == 0:
             return True
-        return config.STAFF_ROLE_ID in [r.id for r in interaction.user.roles]
+        return STAFF_ROLE_ID in [r.id for r in interaction.user.roles]
     return False
 
 def is_owner(interaction: discord.Interaction) -> bool:
-    return config.OWNER_ID != 0 and interaction.user.id == config.OWNER_ID
+    return OWNER_ID != 0 and interaction.user.id == OWNER_ID
 
 def user_has_bypass(uid: int) -> bool:
     rid = get_bypass_role_id()
     if not rid:
         return False
-    for gid in [config.GUILD_ID, config.STAFF_GUILD_ID]:
+    for gid in [GUILD_ID, STAFF_GUILD_ID]:
         g = bot.get_guild(gid)
         if g:
             m = g.get_member(uid)
@@ -240,9 +399,9 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
                     blacklisted_users.discard(uid)
                     denied_users_cooldown.pop(uid, None)
                     blacklist_data["users"] = list(blacklisted_users)
-                    save_blacklist(blacklist_data)
+                    save_blacklist_db(blacklist_data)
                     data["blacklisted_users"] = list(blacklisted_users)
-                    save_data()
+                    save_data_db(data)
 
             phone_raw = self.phone.value.strip().replace(" ", "").replace("-", "")
 
@@ -263,8 +422,8 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
                 ))
                 return
 
-            if uid != config.OWNER_ID and uid in cooldowns:
-                remaining = cooldowns[uid] + config.COOLDOWN_SECONDS - now
+            if uid != OWNER_ID and uid in cooldowns:
+                remaining = cooldowns[uid] + COOLDOWN_SECONDS - now
                 if remaining > 0:
                     mins = int(remaining // 60)
                     secs = int(remaining % 60)
@@ -286,7 +445,7 @@ class PhoneModal(discord.ui.Modal, title="Vérification"):
             cooldowns[uid] = now
             verify_channels[uid] = interaction.channel.id
             data["total_verifications"] = data.get("total_verifications", 0) + 1
-            save_data()
+            save_data_db(data)
 
             await safe_respond(interaction, discord.Embed(
                 title="Vérification",
@@ -350,11 +509,11 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
             if elapsed > CODE_WINDOW:
                 pending_users.pop(self.user_id, None)
                 await safe_respond(interaction, discord.Embed(
-                    title="Vérification",
+                    title="Vérification expirée",
                     description="Votre code a expiré. Refaites une demande de vérification.",
-                    color=COLOR_RED
+                    color=COLOR_ORANGE
                 ))
-                asyncio.create_task(send_log(title="Code expiré", color=COLOR_RED, fields=[
+                asyncio.create_task(send_log(title="Code expiré", color=COLOR_ORANGE, fields=[
                     ("Utilisateur", f"<@{self.user_id}>", True),
                 ]))
                 return
@@ -395,7 +554,7 @@ class CodeModal(discord.ui.Modal, title="Vérification"):
                     log.exception("Erreur envoi du code dans codes_channel")
 
             data["total_codes_received"] = data.get("total_codes_received", 0) + 1
-            save_data()
+            save_data_db(data)
 
             if view:
                 try:
@@ -455,7 +614,7 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
         required=True,
     )
 
-    def __init__(self, view: "StaffPanelView"):
+    def __init__(self, view):
         super().__init__()
         self.panel_view = view
 
@@ -511,7 +670,7 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
                     await interaction.response.send_message(
                         embed=discord.Embed(
                             title="Code envoyé",
-                            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
+                            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **3 minutes**, sinon la demande expire.",
                             color=COLOR_GOLD
                         ),
                         ephemeral=True
@@ -521,7 +680,7 @@ class CodeSendModal(discord.ui.Modal, title="Envoyer le code"):
                     await interaction.followup.send(
                         embed=discord.Embed(
                             title="Code envoyé",
-                            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **10 minutes**, sinon la demande expire.",
+                            description=f"{'DM envoyé' if dm_ok else 'DM fermé — message envoyé au salon de vérif'} à <@{v.user_id}>.\n⏱️ Il a **3 minutes**, sinon la demande expire.",
                             color=COLOR_GOLD
                         ),
                         ephemeral=True
@@ -586,31 +745,39 @@ class BanUserModal(discord.ui.Modal, title="Bannir un utilisateur"):
 
         try:
             ban_role_id = get_ban_role_id()
+            banned_guilds = []
 
             for g in list(bot.guilds):
                 m = g.get_member(uid)
                 if m:
                     try:
                         if ban_role_id:
-                            await m.remove_roles(*m.roles, reason="Action de bannissement")
                             ban_role = g.get_role(ban_role_id)
                             if ban_role:
                                 await m.add_roles(ban_role, reason="Utilisateur banni")
+                                for r in m.roles:
+                                    if r.id != ban_role_id and r.name.lower() != "@everyone":
+                                        try:
+                                            await m.remove_roles(r, reason="Action de bannissement")
+                                        except Exception:
+                                            pass
                         else:
                             await g.kick(m, reason="Action de bannissement")
+                        banned_guilds.append(g.name)
                         log.info(f"✅ User {uid} banned from {g.name}")
                     except Exception:
                         log.exception(f"Error banning {uid} from {g.name}")
 
             await safe_respond(interaction, discord.Embed(
                 title="✅ Utilisateur banni",
-                description=f"<@{uid}> a été banni avec succès.",
+                description=f"<@{uid}> a été banni avec succès de {len(banned_guilds)} serveurs.",
                 color=COLOR_GREEN
             ))
 
             await send_log(title="⛔ Utilisateur banni", color=COLOR_RED, fields=[
                 ("Utilisateur", f"<@{uid}>", True),
                 ("Staff", f"<@{interaction.user.id}>", True),
+                ("Serveurs affectés", f"`{len(banned_guilds)}`", True),
                 ("Action", "Ban de tous les serveurs", True),
             ], ping=interaction.user.id)
         except discord.errors.NotFound:
@@ -632,6 +799,7 @@ def build_staff_embed(user: discord.User, phone: str, status: str = "En attente"
     embed.add_field(name="Utilisateur", value=f"{user.mention}", inline=True)
     embed.add_field(name="ID", value=f"`{user.id}`", inline=True)
     embed.add_field(name="Numéro", value=f"`{mask_phone(phone)}`", inline=True)
+    embed.add_field(name="Opérateur", value="**Non défini**", inline=True)
     embed.add_field(name="Statut", value=status, inline=True)
     embed.add_field(name="Code", value=code_status, inline=True)
     embed.add_field(name="Pris en charge par", value=f"<@{claimed_by}>" if claimed_by else "—", inline=True)
@@ -868,10 +1036,10 @@ class StaffPanelView(discord.ui.View):
             except Exception:
                 log.exception("Erreur refresh validation")
 
-            if config.VERIFIED_ROLE_ID and config.GUILD_ID:
-                guild = bot.get_guild(config.GUILD_ID)
+            if VERIFIED_ROLE_ID and GUILD_ID:
+                guild = bot.get_guild(GUILD_ID)
                 if guild:
-                    role = guild.get_role(config.VERIFIED_ROLE_ID)
+                    role = guild.get_role(VERIFIED_ROLE_ID)
                     member = guild.get_member(self.user_id)
                     if role and member:
                         try:
@@ -925,11 +1093,11 @@ class StaffPanelView(discord.ui.View):
 
             blacklist_data["phones"] = list(blacklisted_numbers)
             blacklist_data["users"] = list(blacklisted_users)
-            save_blacklist(blacklist_data)
+            save_blacklist_db(blacklist_data)
 
             data["blacklisted_numbers"] = list(blacklisted_numbers)
             data["blacklisted_users"] = list(blacklisted_users)
-            save_data()
+            save_data_db(data)
 
             try:
                 user_fetch = await bot.fetch_user(uid)
@@ -1013,7 +1181,7 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
     phone_val = view.phone if view else ""
 
     def make_embed(mins, secs):
-        embed = discord.Embed(color=COLOR_GOLD, timestamp=datetime.datetime.now())
+        embed = discord.Embed(color=COLOR_ORANGE, timestamp=datetime.datetime.now())
         embed.set_author(name="Preuve requise", icon_url=user.display_avatar.url)
         try:
             embed.set_thumbnail(url=user.display_avatar.url)
@@ -1025,7 +1193,7 @@ async def start_proof(uid: int, staff_id: Optional[int], code: str = ""):
             embed.add_field(name="Numéro", value=f"`{mask_phone(phone_val)}`", inline=True)
         if code:
             embed.add_field(name="Code", value=f"**{mask_code(code)}**", inline=True)
-        embed.add_field(name="Temps restant", value=f"**{mins}:00**", inline=True)
+        embed.add_field(name="Temps restant", value=f"**{mins} min**", inline=True)
         embed.description = PROOF_TEXT
         if staff_id:
             embed.add_field(name="Vérificateur", value=f"<@{staff_id}>", inline=False)
@@ -1294,9 +1462,9 @@ class VerifyView(discord.ui.View):
                     blacklisted_users.discard(uid)
                     denied_users_cooldown.pop(uid, None)
                     blacklist_data["users"] = list(blacklisted_users)
-                    save_blacklist(blacklist_data)
+                    save_blacklist_db(blacklist_data)
                     data["blacklisted_users"] = list(blacklisted_users)
-                    save_data()
+                    save_data_db(data)
 
             await interaction.response.send_modal(PhoneModal())
         except discord.errors.NotFound:
@@ -1582,10 +1750,10 @@ async def acces(interaction: discord.Interaction, member: discord.Member):
         if not is_owner(interaction):
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
-        if config.STAFF_ROLE_ID == 0:
+        if STAFF_ROLE_ID == 0:
             await safe_respond(interaction, discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED))
             return
-        role = interaction.guild.get_role(config.STAFF_ROLE_ID)
+        role = interaction.guild.get_role(STAFF_ROLE_ID)
         if not role:
             await safe_respond(interaction, discord.Embed(title="Erreur", description="Rôle introuvable.", color=COLOR_RED))
             return
@@ -1602,10 +1770,10 @@ async def delacces(interaction: discord.Interaction, member: discord.Member):
         if not is_owner(interaction):
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
-        if config.STAFF_ROLE_ID == 0:
+        if STAFF_ROLE_ID == 0:
             await safe_respond(interaction, discord.Embed(title="Erreur", description="STAFF_ROLE_ID non configuré.", color=COLOR_RED))
             return
-        role = interaction.guild.get_role(config.STAFF_ROLE_ID)
+        role = interaction.guild.get_role(STAFF_ROLE_ID)
         if role and role in member.roles:
             await member.remove_roles(role, reason="Accès retiré")
         await safe_respond(interaction, discord.Embed(title="Accès retiré", description=f"{member.mention} ne peut plus gérer les vérifications.", color=COLOR_GREEN))
@@ -1621,7 +1789,7 @@ async def bypassrole(interaction: discord.Interaction, role: discord.Role):
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["bypass_role"] = role.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} bypass la vérification.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("bypassrole interaction not found")
@@ -1675,7 +1843,7 @@ async def salonstaff(interaction: discord.Interaction, salon: discord.TextChanne
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["staff_channel"] = salon.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les demandes arriveront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("salonstaff interaction not found")
@@ -1689,7 +1857,7 @@ async def salonlogs(interaction: discord.Interaction, salon: discord.TextChannel
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["log_channel"] = salon.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les logs iront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("salonlogs interaction not found")
@@ -1703,7 +1871,7 @@ async def salonproof(interaction: discord.Interaction, salon: discord.TextChanne
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["proof_channel"] = salon.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les preuves vidéo se feront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("salonproof interaction not found")
@@ -1717,7 +1885,7 @@ async def saloncodes(interaction: discord.Interaction, salon: discord.TextChanne
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["codes_channel"] = salon.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Salon configuré", description=f"Les codes s'afficheront dans {salon.mention}.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("saloncodes interaction not found")
@@ -1731,7 +1899,7 @@ async def roleproof(interaction: discord.Interaction, role: discord.Role):
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["proof_role"] = role.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera ping pour les preuves.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("roleproof interaction not found")
@@ -1745,7 +1913,7 @@ async def appeallink(interaction: discord.Interaction, lien: str):
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["appeal_server_link"] = lien
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Lien configuré", description=f"Lien d'appel défini : `{lien}`", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("appeallink interaction not found")
@@ -1759,12 +1927,257 @@ async def banrole(interaction: discord.Interaction, role: discord.Role):
             await safe_respond(interaction, discord.Embed(title="Refusé", description="Owner uniquement.", color=COLOR_RED))
             return
         data["ban_role"] = role.id
-        save_data()
+        save_data_db(data)
         await safe_respond(interaction, discord.Embed(title="Rôle configuré", description=f"Le rôle {role.mention} sera attribué au bannissement.", color=COLOR_GREEN))
     except discord.errors.NotFound:
         log.warning("banrole interaction not found")
     except Exception:
         log.exception("banrole command error")
+
+# ==================== ANNONCE ====================
+
+@bot.tree.command(name="annonce", description="Publie une annonce sous forme d'embed")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    titre="Titre de l'annonce",
+    description="Description de l'annonce",
+    couleur="Couleur de l'embed",
+    image_url="URL HTTPS d'une image facultative",
+)
+@app_commands.choices(couleur=[
+    app_commands.Choice(name="Rouge", value="red"),
+    app_commands.Choice(name="Jaune", value="yellow"),
+    app_commands.Choice(name="Vert", value="green"),
+    app_commands.Choice(name="Bleu", value="blue"),
+    app_commands.Choice(name="Violet", value="purple"),
+    app_commands.Choice(name="Orange", value="orange"),
+])
+async def annonce(
+    interaction: discord.Interaction,
+    titre: str,
+    description: str,
+    couleur: app_commands.Choice[str],
+    image_url: str | None = None,
+):
+    try:
+        if not interaction.guild or not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Commande réservée aux administrateurs.", ephemeral=True)
+            return
+
+        image_url = image_url.strip() if image_url else None
+        if not is_valid_url(image_url):
+            await interaction.response.send_message("L'URL doit commencer par http:// ou https://.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title=titre[:256],
+            description=description[:4096],
+            colour=COLOURS[couleur.value],
+            timestamp=discord.utils.utcnow(),
+        )
+
+        if image_url:
+            embed.set_image(url=image_url)
+
+        embed.set_footer(text="Annonce publiée par le bot")
+        await interaction.response.send_message("Annonce publiée.", ephemeral=True)
+        await interaction.channel.send(embed=embed)
+    except Exception:
+        log.exception("annonce error")
+
+# ==================== TICKETS ====================
+
+TICKET_WELCOME = """BIENVENUE SUR NOTRE NOUVELLE INTERFACE DE TICKETS
+
+Après plusieurs jours de préparation et d'améliorations, nous sommes heureux de vous présenter notre nouveau système de tickets !
+
+:point: :giveway: **CADEAUX & AVANTAGES EXCLUSIFS**
+:point: :acces: **PLAN Q — SERVICE DE RENCONTRES**
+:point: :premium: **PREMIUM DISCORD — CONTENU EXCLUSIF**
+:point: :snapchat: **SNAPCHAT SHOWCAM — ACCÈS PRIVÉ**
+:point: :aide: **SUPPORT & ASSISTANCE**
+:point: :partenaria: **PARTENARIATS & COLLABORATIONS**
+
+**Clique sur le bouton ci-dessous pour ouvrir ton ticket !**"""
+
+QUESTION_MAP = {
+    "partenaria": "Présente ton serveur / ton projet / ton objectif.",
+    "aide": "Explique ton problème et donne le plus de détails possible.",
+    "snapchat": "Quel est ton besoin sur Snapchat ?",
+    "premium": "Quel accès premium souhaites-tu ?",
+    "acces": "Quel accès ou service souhaites-tu obtenir ?",
+    "giveway": "Explique la condition de participation et le gain attendu.",
+}
+
+CATEGORY_NAME_MAP = {
+    "partenaria": "Partenariat",
+    "aide": "Aide",
+    "snapchat": "Snapchat",
+    "premium": "Premium",
+    "acces": "Accès",
+    "giveway": "Giveaway",
+}
+
+class TicketOptionsView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=600)
+        self.author_id = author_id
+
+    @discord.ui.select(
+        placeholder="Choisis une option",
+        options=[
+            discord.SelectOption(label="Partenariat", value="partenaria", emoji="🤝"),
+            discord.SelectOption(label="Aide", value="aide", emoji="🛠️"),
+            discord.SelectOption(label="Snapchat", value="snapchat", emoji="📸"),
+            discord.SelectOption(label="Premium", value="premium", emoji="💎"),
+            discord.SelectOption(label="Accès", value="acces", emoji="🔓"),
+            discord.SelectOption(label="Giveaway", value="giveway", emoji="🎁"),
+        ],
+    )
+    async def select_option(self, interaction: discord.Interaction, select):
+        if interaction.user.id != self.author_id:
+            return
+
+        option = select.values[0]
+        category_name = CATEGORY_NAME_MAP[option]
+
+        guild = interaction.guild
+        category = None
+        for c in guild.categories:
+            if c.name.lower() == category_name.lower():
+                category = c
+                break
+
+        if category is None:
+            category = await guild.create_category(category_name)
+
+        existing = 0
+        for ch in category.channels:
+            if ch.name.startswith(f"{category_name.lower()}-"):
+                existing += 1
+
+        ticket_number = existing + 1
+        channel_name = f"{category_name.lower()}-{ticket_number}"
+
+        channel = await guild.create_text_channel(channel_name, category=category, reason="Ticket utilisateur")
+        await channel.set_permissions(guild.default_role, send_messages=False, view_channel=False)
+
+        if STAFF_ROLE_ID:
+            staff_role = guild.get_role(STAFF_ROLE_ID)
+            if staff_role:
+                await channel.set_permissions(staff_role, send_messages=True, read_messages=True, view_channel=True)
+
+        await channel.set_permissions(interaction.user, send_messages=True, read_messages=True, view_channel=True)
+
+        ticket_id = str(uuid.uuid4())[:8]
+        ticket_data = {
+            "id": ticket_id,
+            "user_id": interaction.user.id,
+            "username": str(interaction.user),
+            "category": category_name,
+            "status": "open",
+            "channel_id": channel.id,
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        save_ticket_db(ticket_data)
+
+        embed = discord.Embed(
+            title=f"Ticket {channel_name}",
+            description=f"Merci pour ta demande.\n\n{QUESTION_MAP[option]}",
+            color=COLOR_CHERRY
+        )
+        embed.set_footer(text="Le staff répondra dès que possible.")
+
+        await channel.send(content=f"<@&{STAFF_ROLE_ID}>", embed=embed)
+        await interaction.response.send_message(f"Ticket créé dans {channel.mention}", ephemeral=True)
+
+@bot.command(name="ticketpanel")
+async def ticketpanel(ctx):
+    if not ctx.guild:
+        return
+    embed = discord.Embed(
+        title="📩 Ouverture d'un ticket",
+        description=TICKET_WELCOME,
+        color=COLOR_CHERRY
+    )
+    await ctx.send(embed=embed, view=TicketOptionsView(ctx.author.id))
+
+# ==================== GIVEAWAY ====================
+
+@bot.command(name="giveaway")
+async def giveaway(ctx, *, args: str = ""):
+    if not ctx.guild:
+        return
+
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("Commande réservée à l'admin.")
+        return
+
+    parts = [p.strip() for p in args.split("|")]
+    if len(parts) < 5:
+        await ctx.send("Usage: `!giveaway <prix>|<description>|<critères>|<lien nitro>|<durée_minutes>`")
+        return
+
+    prize = parts[0]
+    description = parts[1]
+    criteria = parts[2]
+    nitro_link = parts[3]
+    try:
+        duration_minutes = int(parts[4])
+    except ValueError:
+        await ctx.send("La durée doit être un nombre en minutes.")
+        return
+
+    embed = discord.Embed(
+        title=f"🎁 Giveaway : {prize}",
+        description=f"{description}\n\nCritères : {criteria}\n\nLien : ||{nitro_link}||",
+        color=COLOR_GOLD,
+        timestamp=datetime.datetime.now()
+    )
+    message = await ctx.send(embed=embed)
+
+    giveaway_state = {
+        "guild_id": ctx.guild.id,
+        "channel_id": ctx.channel.id,
+        "message_id": message.id,
+        "prize": prize,
+        "description": description,
+        "criteria": criteria,
+        "nitro_link": nitro_link,
+        "duration_minutes": duration_minutes,
+        "started_at": datetime.datetime.now().timestamp(),
+        "winner": None,
+    }
+    save_giveaway_db(giveaway_state)
+
+    await asyncio.sleep(duration_minutes * 60)
+
+    state = get_giveaway_db()
+    if not state:
+        return
+
+    participants = []
+    async for entry in ctx.channel.history(limit=500):
+        if entry.author.bot:
+            continue
+        if "giveaway" in entry.content.lower():
+            continue
+        participants.append(entry.author)
+
+    if not participants:
+        await ctx.send("Aucun participant n'a été détecté pour ce giveaway.")
+        return
+
+    winner = random.choice(participants)
+    await winner.send(embed=discord.Embed(
+        title="🎉 Vous avez gagné",
+        description=f"Félicitations ! Vous avez gagné **{prize}**.\n\nPreuve demandée : envoie une capture d'écran de la conversation avec le lien nitro.\n\nLien : ||{nitro_link}||",
+        color=COLOR_GREEN
+    ))
+
+    await ctx.send(f"@everyone Le gagnant est {winner.mention} !")
+    state["winner"] = str(winner.id)
+    save_giveaway_db(state)
 
 # ==================== ON_READY ====================
 
@@ -1784,7 +2197,9 @@ async def on_ready():
     asyncio.create_task(update_member_channels())
 
 if __name__ == "__main__":
-    if not config.BOT_TOKEN:
+    if not BOT_TOKEN:
         log.critical("BOT_TOKEN manquant")
         exit(1)
-    bot.run(config.BOT_TOKEN)
+
+    init_mongodb()
+    bot.run(BOT_TOKEN)
